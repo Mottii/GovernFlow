@@ -46,3 +46,7 @@ jobs:
       - run: uv run mypy
       - run: uv run pytest
       - run: docker compose config --quiet
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --test sdks/javascript/index.test.mjs

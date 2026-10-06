@@ -49,3 +49,7 @@ The mocked Telegram Bot API received the summary, action content, and signed app
 ## T3.3 — 2026-10-06
 
 SMTP and webhook mocks received full action content and review links. Incoming webhook decisions accepted a valid signature and rejected missing signatures, altered bodies, stale timestamps, and reused event IDs. All 40 tests passed against Postgres 16; ruff, mypy, and Compose checks passed. SMTP and external webhook delivery remain untested live.
+
+## T3.4 — 2026-10-06
+
+Twenty concurrent consumptions admitted exactly one execution. Altered actions, foreign workflows, and changed signatures were rejected. Python and JavaScript wrappers blocked pending actions and consumed approval before execution. All 41 backend tests passed against Postgres 16; the Node test, ruff, and backend/SDK mypy passed. The PDF's local HMAC verification instruction is corrected in `docs/decisions.md`.

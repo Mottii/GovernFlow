@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from approvals.signing import sign
 from audit.chain import AuditEventInput, append_event
 from core.models import Approval, Notification, Workflow
 from core.security import decrypt_provider_key, encrypt_provider_key
@@ -42,7 +43,7 @@ def action_hash(name: str, action: dict[str, Any]) -> bytes:
 
 
 def view(record: Approval) -> dict[str, Any]:
-    return {
+    result: dict[str, Any] = {
         "approval_id": str(record.id),
         "status": record.status,
         "decision": "allow"
@@ -52,6 +53,22 @@ def view(record: Approval) -> dict[str, Any]:
         else "pending",
         "expires_at": record.expires_at.isoformat(),
     }
+    if record.status == "approved" and record.decided_at:
+        expiry = min(record.expires_at, record.decided_at + timedelta(minutes=15))
+        if record.consumed_at is not None or expiry <= datetime.now(UTC):
+            result["decision"] = "deny"
+            result["reason"] = "consumed" if record.consumed_at else "token_expired"
+        else:
+            result["token"] = sign(
+                {
+                    "purpose": "execute",
+                    "approval_id": str(record.id),
+                    "workflow_id": str(record.workflow_id),
+                    "action_hash": record.action_hash.hex(),
+                    "exp": int(expiry.timestamp()),
+                }
+            )
+    return result
 
 
 def content(record: Approval, client_id: uuid.UUID) -> dict[str, Any]:

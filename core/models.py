@@ -226,6 +226,7 @@ class Approval(Base):
         UUID(as_uuid=True), ForeignKey("workflows.id"), nullable=False
     )
     run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     content_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary)
     content_nonce: Mapped[bytes | None] = mapped_column(LargeBinary)
     timeout_outcome: Mapped[str] = mapped_column(Text, nullable=False, server_default="deny")
