@@ -29,3 +29,7 @@ The error matrix checks authentication, malformed requests, budget rejection, ki
 ## T2.5 — 2026-10-06
 
 All native routes rejected disallowed models with 403 and rate-limited calls with 429 and `Retry-After`. Fifty concurrent calls sharing a workflow admitted exactly seven at an RPM cap of seven. All 23 tests, ruff, and mypy passed, including migration upgrade/downgrade and the 200-call budget race.
+
+## T2.6 — 2026-10-06
+
+Fifteen-call soak tests stopped at configured step, run-cost, and loop-RPM thresholds, then returned kill responses. Alerts and audit chains verified. A provider charge of 1,000 micro-USD above its reservation was recorded in full and the next call was blocked. All 27 tests, ruff, and mypy passed.

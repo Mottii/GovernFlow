@@ -31,6 +31,7 @@ from policy.budget import (
     settle,
 )
 from policy.kill import check_kill
+from policy.loop import loop_policy
 from policy.traffic import check_traffic
 
 router = APIRouter()
@@ -154,10 +155,7 @@ async def messages(
     price = await current_price(session, "anthropic", model)
     if price is None:
         raise GatewayError(400, "model_not_priced", "The model has no configured price")
-    budget_policy = auth.policy.get("budget", {})
-    per_run_cap = budget_policy.get("per_run_micro", 2**63 - 1)
-    if isinstance(per_run_cap, bool) or not isinstance(per_run_cap, int) or per_run_cap <= 0:
-        raise GatewayError(503, "invalid_policy", "Per-run cap is not configured correctly")
+    per_run_cap, max_steps, _ = loop_policy(auth.policy)
     now = datetime.now(UTC)
     run_key = request.headers.get("X-Run-Id") or f"window:{now:%Y%m%d%H}{now.minute // 10}"
     if len(run_key) > 200:
@@ -181,7 +179,12 @@ async def messages(
         credential.label,
     )
     held = await reserve(
-        session, auth.workflow_id, run_key, estimate_micro(body, max_output, price), per_run_cap
+        session,
+        auth.workflow_id,
+        run_key,
+        estimate_micro(body, max_output, price),
+        per_run_cap,
+        max_steps,
     )
     if held is None:
         raise GatewayError(429, "budget_exceeded", "Workflow budget exceeded")

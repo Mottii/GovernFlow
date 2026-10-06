@@ -31,6 +31,7 @@ from gateway.openai_more import router as openai_more_router
 from gateway.streaming import stream_openai_chat
 from policy.budget import cost_micro, current_price, estimate_micro, release, reserve, settle
 from policy.kill import check_kill
+from policy.loop import loop_policy
 from policy.traffic import allowed_models, check_traffic
 
 app = FastAPI(title="Governed Automation Gateway")
@@ -103,10 +104,7 @@ async def chat_completions(
         max_output = int(os.environ.get("DEFAULT_MAX_OUTPUT_TOKENS", "4096"))
     if isinstance(max_output, bool) or not isinstance(max_output, int) or max_output <= 0:
         raise GatewayError(400, "invalid_max_tokens", "Output token limit must be positive")
-    budget_policy = auth.policy.get("budget", {})
-    per_run_cap = budget_policy.get("per_run_micro", 2**63 - 1)
-    if isinstance(per_run_cap, bool) or not isinstance(per_run_cap, int) or per_run_cap <= 0:
-        raise GatewayError(503, "invalid_policy", "Per-run cap is not configured correctly")
+    per_run_cap, max_steps, _ = loop_policy(auth.policy)
     now = datetime.now(UTC)
     run_key = request.headers.get("X-Run-Id")
     if not run_key:
@@ -140,6 +138,7 @@ async def chat_completions(
         run_key,
         estimate_micro(body, max_output, price),
         per_run_cap,
+        max_steps,
     )
     if held is None:
         raise GatewayError(429, "budget_exceeded", "Workflow budget exceeded")

@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from audit.chain import AuditEventInput, append_event
 from core.models import Budget, Price, Reservation, Run
 from core.usage import Usage
+from policy.loop import trip
 
 
 def ceil_div(numerator: int, denominator: int) -> int:
@@ -64,6 +65,7 @@ async def reserve(
     run_key: str,
     est_micro: int,
     per_run_cap_micro: int,
+    max_steps: int | None = None,
 ) -> HeldReservation | None:
     period = datetime.now(UTC).strftime("%Y-%m")
     # Settlement takes the budget row before the run row. Reserve in that
@@ -103,6 +105,8 @@ async def reserve(
             .where(
                 Run.id == run_id,
                 Run.cost_micro + Run.reserved_micro + est_micro <= Run.cap_micro,
+                Run.cost_micro + Run.reserved_micro + est_micro <= per_run_cap_micro,
+                Run.step_count < (max_steps if max_steps is not None else 2**31 - 1),
             )
             .values(
                 reserved_micro=Run.reserved_micro + est_micro,
@@ -113,6 +117,8 @@ async def reserve(
     ).scalar_one_or_none()
     if accepted_run is None:
         await session.rollback()
+        await trip(session, workflow_id, "loop_breaker", run_id=run_id)
+        await session.commit()
         return None
     record = Reservation(budget_id=budget_id, run_id=run_id, est_micro=est_micro)
     session.add(record)
@@ -155,18 +161,17 @@ async def settle(
     record.settled_at = datetime.now(UTC)
     if audit is not None:
         await append_event(session, audit, record.run_id)
-        if actual_micro > record.est_micro:
-            await append_event(
-                session,
-                AuditEventInput(
-                    client_id=audit.client_id,
-                    type="budget_overrun",
-                    provider=audit.provider,
-                    model=audit.model,
-                    cost_micro=actual_micro - record.est_micro,
-                ),
-                record.run_id,
-            )
+    if actual_micro > record.est_micro:
+        workflow_id = (
+            await session.execute(select(Run.workflow_id).where(Run.id == record.run_id))
+        ).scalar_one()
+        await trip(
+            session,
+            workflow_id,
+            "budget_overrun",
+            run_id=record.run_id,
+            cost_micro=actual_micro - record.est_micro,
+        )
     await session.commit()
     return True
 

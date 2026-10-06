@@ -20,6 +20,7 @@ from gateway.auth import AuthContext
 from gateway.errors import GatewayError
 from policy.budget import cost_micro, current_price, estimate_micro, release, reserve, settle
 from policy.kill import check_kill
+from policy.loop import loop_policy
 from policy.traffic import check_traffic
 
 
@@ -49,10 +50,7 @@ async def proxy_native(
     price = await current_price(session, provider, model)
     if price is None:
         raise GatewayError(400, "model_not_priced", "The model has no configured price")
-    budget_policy = auth.policy.get("budget", {})
-    cap = budget_policy.get("per_run_micro", 2**63 - 1)
-    if isinstance(cap, bool) or not isinstance(cap, int) or cap <= 0:
-        raise GatewayError(503, "invalid_policy", "Per-run cap is invalid")
+    cap, max_steps, _ = loop_policy(auth.policy)
     now = datetime.now(UTC)
     run_key = request.headers.get("X-Run-Id") or f"window:{now:%Y%m%d%H}{now.minute // 10}"
     if len(run_key) > 200:
@@ -76,7 +74,7 @@ async def proxy_native(
         credential.label,
     )
     held = await reserve(
-        session, auth.workflow_id, run_key, estimate_micro(body, max_output, price), cap
+        session, auth.workflow_id, run_key, estimate_micro(body, max_output, price), cap, max_steps
     )
     if held is None:
         raise GatewayError(429, "budget_exceeded", "Workflow budget exceeded")
