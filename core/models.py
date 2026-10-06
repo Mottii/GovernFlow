@@ -267,6 +267,8 @@ class RateBucket(Base):
 class Alert(Base):
     __tablename__ = "alerts"
 
+    dedup_key: Mapped[str | None] = mapped_column(Text, unique=True)
+
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
     )

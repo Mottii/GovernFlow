@@ -3,7 +3,7 @@ import uuid
 from datetime import UTC, date, datetime, time, timedelta
 
 import httpx
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,6 +12,7 @@ from gateway.adapters.anthropic import message_usage
 from gateway.adapters.gemini import content_usage
 from gateway.adapters.openai import chat_usage
 from gateway.adapters.openai_more import embeddings_usage, responses_usage
+from reconcile.drift import detect
 from reconcile.providers import add, fetch
 
 
@@ -65,6 +66,10 @@ async def reconcile(session: AsyncSession, account: ProviderAccount, day: date) 
     now = datetime.now(UTC)
     try:
         observed = await fetch(account, day)
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
+            {"key": f"reconcile:{key['client_id']}:{key['provider']}:{day}"},
+        )
         models, cost, estimated = await gateway_totals(
             session, account.client_id, account.provider, day
         )
@@ -103,6 +108,8 @@ async def reconcile(session: AsyncSession, account: ProviderAccount, day: date) 
                 fetched_at=now,
             )
         )
+        await session.flush()
+        await detect(session, account.client_id, account.provider, day)
         status, error = "complete", None
     except (httpx.HTTPError, ValueError, KeyError, RuntimeError):
         await session.rollback()

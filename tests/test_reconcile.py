@@ -97,3 +97,44 @@ async def test_daily_provider_usage_cost_units_mapping_and_failure(governed, mon
         )
         assert duplicate.status_code == 409
     assert money("123.78912", 10000) == 1237892
+
+
+@pytest.mark.asyncio
+async def test_external_usage_flags_possible_bypass_once_and_resolves(governed, monkeypatch):
+    import copy
+
+    from audit.chain import verify_chain
+    from core.models import Alert, Event
+
+    monkeypatch.setenv("OPENAI_ADMIN_KEY", "oa-admin-mock")
+    async with governed.factory() as session:
+        account = ProviderAccount(
+            client_id=governed.a.client.id, provider="openai", external_id="proj_A"
+        )
+        session.add(account)
+        await session.commit()
+        with respx.mock(assert_all_called=True) as mock:
+            usage = mock.get("https://api.openai.com/v1/organization/usage/completions").respond(
+                200, json=FIXTURES["openai_usage"]
+            )
+            mock.get("https://api.openai.com/v1/organization/usage/embeddings").respond(
+                200, json=FIXTURES["openai_embeddings"]
+            )
+            costs = mock.get("https://api.openai.com/v1/organization/costs").respond(
+                200, json=FIXTURES["openai_costs"]
+            )
+            for _ in range(2):
+                assert await reconcile(session, account, datetime.now(UTC).date())
+            alerts = (await session.execute(select(Alert))).scalars().all()
+            assert len(alerts) == 1 and alerts[0].kind == "possible_bypass"
+            assert alerts[0].details["differences"]["gpt-mock"]["input_tokens"] == 12
+            assert alerts[0].client_id == governed.a.client.id
+            events = (await session.execute(select(Event))).scalars().all()
+            assert [event.type for event in events] == ["drift_detected"]
+            empty = copy.deepcopy(FIXTURES["openai_embeddings"])
+            usage.respond(200, json=empty)
+            costs.respond(200, json=empty)
+            assert await reconcile(session, account, datetime.now(UTC).date())
+            await session.refresh(alerts[0])
+            assert alerts[0].details["resolved"] is True
+            assert (await verify_chain(session, governed.a.client.id))[0]

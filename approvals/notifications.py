@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from approvals.service import content
@@ -88,7 +88,8 @@ async def dispatch(session: AsyncSession) -> int:
             await session.execute(
                 select(Notification)
                 .where(
-                    Notification.status == "pending", Notification.next_attempt <= datetime.now(UTC)
+                    Notification.status == "pending",
+                    Notification.next_attempt <= func.clock_timestamp(),
                 )
                 .with_for_update(skip_locked=True)
                 .limit(50)

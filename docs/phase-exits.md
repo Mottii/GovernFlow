@@ -69,3 +69,7 @@ All six catalog models seeded idempotently with source URLs and UTC verification
 ## T4.2 — 2026-10-06
 
 Daily mock reporting compared OpenAI and Anthropic model usage and total costs with gateway events, including Anthropic cents conversion and filtering another workspace. The mapped OpenAI project header was verified; duplicate account assignments were rejected. A reporting outage recorded a failed job without replacing data with zeros. All 48 tests passed against Postgres 16; ruff, mypy, and Compose configuration checks passed. Live provider reporting remains pending organization credentials.
+
+## T4.3 — 2026-10-06
+
+A mock provider call absent from the gateway triggered `possible_bypass` in one reconciliation run. Repeated refreshes produced one alert; a matching refresh resolved it and the audit chain verified. All 49 tests passed against Postgres 16; ruff and mypy passed.
