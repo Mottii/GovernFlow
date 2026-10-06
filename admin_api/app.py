@@ -10,6 +10,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from approvals.human import router as human_router
 from approvals.service import Decision, decide
 from core.database import get_session
 from core.models import Budget, Client, KillFlag, ProviderCredential, VirtualKey, Workflow
@@ -18,6 +19,7 @@ from gateway.errors import GatewayError, openai_error_handler
 
 app = FastAPI(title="Governed Automation Admin API")
 app.add_exception_handler(GatewayError, openai_error_handler)
+app.include_router(human_router)
 DbSession = Annotated[AsyncSession, Depends(get_session)]
 
 

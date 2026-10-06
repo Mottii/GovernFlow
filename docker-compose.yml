@@ -19,6 +19,7 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://gateway:${POSTGRES_PASSWORD:-local_only_password}@postgres:5432/gateway
       MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY:-}
+      DECISION_SIGNING_KEY: ${DECISION_SIGNING_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-http://mock-provider:8002}
       ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-http://mock-provider:8002}
       GEMINI_BASE_URL: ${GEMINI_BASE_URL:-http://mock-provider:8002}
@@ -39,7 +40,10 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://gateway:${POSTGRES_PASSWORD:-local_only_password}@postgres:5432/gateway
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
+      TELEGRAM_APPROVER_CHAT_IDS: ${TELEGRAM_APPROVER_CHAT_IDS:-}
       MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY:-}
+      DECISION_SIGNING_KEY: ${DECISION_SIGNING_KEY:-}
     ports:
       - "8001:8001"
     depends_on:
@@ -53,6 +57,19 @@ services:
       REPLAY_QUEUE_PATH: /queue/replay.sqlite3
     volumes:
       - replay_queue:/queue
+    depends_on:
+      postgres:
+        condition: service_healthy
+  approval-notifier:
+    build: .
+    command: sh -c "while true; do python -m approvals.notifications; sleep 30; done"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://gateway:${POSTGRES_PASSWORD:-local_only_password}@postgres:5432/gateway
+      MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY:-}
+      DECISION_SIGNING_KEY: ${DECISION_SIGNING_KEY:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_APPROVER_CHAT_IDS: ${TELEGRAM_APPROVER_CHAT_IDS:-}
+      PUBLIC_ADMIN_URL: ${PUBLIC_ADMIN_URL:-http://localhost:8001}
     depends_on:
       postgres:
         condition: service_healthy

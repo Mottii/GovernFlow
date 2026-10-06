@@ -41,3 +41,7 @@ The recorded mock contract matrix passes official OpenAI and Anthropic SDKs for 
 ## T3.1 — 2026-10-06
 
 Checks exercised all four risk classes, strict unknown-action denial, human approval and poll, unauthorized decision rejection, repeated decision rejection, and foreign-tenant approval IDs. All 38 tests passed against Postgres 16; ruff and mypy passed.
+
+## T3.2 — 2026-10-06
+
+The mocked Telegram Bot API received the summary, action content, and signed approve/deny callbacks. Review HTML escaped script content. Unauthorized callbacks were rejected, an authorized callback approved the action, and replay returned 409. All 39 tests passed against Postgres 16; ruff, mypy, and Compose checks passed. Live Telegram delivery is pending credentials; see `docs/live-setup.md`.

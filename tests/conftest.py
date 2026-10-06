@@ -94,6 +94,7 @@ async def governed(monkeypatch: pytest.MonkeyPatch, tmp_path):
     from admin_api.app import app as admin_app
 
     monkeypatch.setenv("ADMIN_TOKEN", "test-admin")
+    monkeypatch.setenv("DECISION_SIGNING_KEY", base64.b64encode(b"d" * 32).decode())
     admin_app.dependency_overrides[get_session] = test_session
     app.dependency_overrides[get_session] = test_session
     try:

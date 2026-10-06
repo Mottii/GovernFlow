@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from audit.chain import AuditEventInput, append_event
-from core.models import Approval, Workflow
+from core.models import Approval, Notification, Workflow
 from core.security import decrypt_provider_key, encrypt_provider_key
 from gateway.auth import AuthContext
 from gateway.errors import GatewayError
@@ -130,6 +130,15 @@ async def check(session: AsyncSession, auth: AuthContext, body: ActionCheck) -> 
                 auth.client_id, "action_approved", content_ref="approval:" + str(record.id)
             ),
         )
+    if record.status == "pending":
+        channels = auth.policy.get("approval_channels", ["telegram"])
+        if not isinstance(channels, list) or any(
+            channel not in ("telegram", "email", "webhook") for channel in channels
+        ):
+            raise GatewayError(503, "invalid_policy", "Approval notification channels are invalid")
+        await session.flush()
+        for channel in set(channels):
+            session.add(Notification(approval_id=record.id, channel=channel))
     await session.commit()
     return view(record)
 
