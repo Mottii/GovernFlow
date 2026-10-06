@@ -1,0 +1,1 @@
+"""Native provider dialect adapters."""

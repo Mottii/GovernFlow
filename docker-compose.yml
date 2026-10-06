@@ -18,6 +18,9 @@ services:
     command: uvicorn gateway.app:app --host 0.0.0.0 --port 8000
     environment:
       DATABASE_URL: postgresql+asyncpg://gateway:${POSTGRES_PASSWORD:-local_only_password}@postgres:5432/gateway
+      MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY:-}
+      OPENAI_BASE_URL: http://mock-provider:8002
+      UPSTREAM_TIMEOUT_S: ${UPSTREAM_TIMEOUT_S:-120}
     ports:
       - "8000:8000"
     depends_on:
