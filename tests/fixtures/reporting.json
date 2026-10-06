@@ -1,0 +1,9 @@
+{
+ "references": ["https://developers.openai.com/api/reference/resources/admin/subresources/organization/subresources/usage/methods/costs", "https://platform.claude.com/docs/en/api/beta/organization/cost_report/retrieve", "https://platform.claude.com/docs/en/api/beta/organization/usage_report/retrieve_messages"],
+ "origin": "mock fixtures, schema verified 2026-10-06",
+ "openai_usage": {"data":[{"results":[{"project_id":"proj_A","model":"gpt-mock","input_tokens":12,"output_tokens":3,"input_cached_tokens":0}]}],"has_more":false,"next_page":null},
+ "openai_embeddings": {"data":[],"has_more":false,"next_page":null},
+ "openai_costs": {"data":[{"results":[{"project_id":"proj_A","line_item":"model usage","amount":{"value":"0.000015","currency":"usd"}}]}],"has_more":false,"next_page":null},
+ "anthropic_usage": {"data":[{"results":[{"workspace_id":"ws_A","model":"claude-mock","uncached_input_tokens":12,"output_tokens":3,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}}]}],"has_more":false,"next_page":null},
+ "anthropic_costs": {"data":[{"results":[{"workspace_id":"ws_A","description":"Claude API Usage","model":"claude-mock","amount":"0.0015","currency":"USD"},{"workspace_id":"ws_OTHER","description":"Claude API Usage","amount":"999","currency":"USD"}]}],"has_more":false,"next_page":null}
+}

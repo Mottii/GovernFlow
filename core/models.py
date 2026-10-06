@@ -306,3 +306,48 @@ class WebhookReceipt(Base):
     received_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class ProviderAccount(Base):
+    __tablename__ = "provider_accounts"
+    __table_args__ = (
+        UniqueConstraint("provider", "external_id"),
+        CheckConstraint("provider IN ('openai','anthropic')"),
+    )
+    client_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("clients.id"), primary_key=True
+    )
+    provider: Mapped[str] = mapped_column(Text, primary_key=True)
+    external_id: Mapped[str] = mapped_column(Text, nullable=False)
+    credential_label: Mapped[str] = mapped_column(Text, server_default="default")
+    inference_key_id: Mapped[str | None] = mapped_column(Text)
+    validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ReconcileSnapshot(Base):
+    __tablename__ = "reconcile_snapshots"
+    client_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("clients.id"), primary_key=True
+    )
+    provider: Mapped[str] = mapped_column(Text, primary_key=True)
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    kind: Mapped[str] = mapped_column(Text, primary_key=True)
+    dimension: Mapped[str] = mapped_column(Text, primary_key=True)
+    gateway: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    observed: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    source_groups: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default="[]"
+    )
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ReconcileJob(Base):
+    __tablename__ = "reconcile_jobs"
+    client_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("clients.id"), primary_key=True
+    )
+    provider: Mapped[str] = mapped_column(Text, primary_key=True)
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    error: Mapped[str | None] = mapped_column(Text)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

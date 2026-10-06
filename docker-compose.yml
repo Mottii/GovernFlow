@@ -40,6 +40,8 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://gateway:${POSTGRES_PASSWORD:-local_only_password}@postgres:5432/gateway
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      OPENAI_ADMIN_KEY: ${OPENAI_ADMIN_KEY:-}
+      ANTHROPIC_ADMIN_KEY: ${ANTHROPIC_ADMIN_KEY:-}
       TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
       WEBHOOK_SIGNING_KEY: ${WEBHOOK_SIGNING_KEY:-}
       TELEGRAM_APPROVER_CHAT_IDS: ${TELEGRAM_APPROVER_CHAT_IDS:-}
@@ -58,6 +60,16 @@ services:
       REPLAY_QUEUE_PATH: /queue/replay.sqlite3
     volumes:
       - replay_queue:/queue
+    depends_on:
+      postgres:
+        condition: service_healthy
+  reconciler:
+    build: .
+    command: sh -c "while true; do python -m reconcile.service; sleep 86400; done"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://gateway:${POSTGRES_PASSWORD:-local_only_password}@postgres:5432/gateway
+      OPENAI_ADMIN_KEY: ${OPENAI_ADMIN_KEY:-}
+      ANTHROPIC_ADMIN_KEY: ${ANTHROPIC_ADMIN_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy

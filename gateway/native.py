@@ -16,7 +16,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from audit.chain import AuditEventInput
-from core.models import Budget, ProviderCredential, Run
+from core.models import Budget, ProviderAccount, ProviderCredential, Run
 from core.security import decrypt_provider_key
 from core.usage import Usage
 from gateway.adapters.openai import ChatStreamTracker
@@ -63,12 +63,27 @@ async def proxy_native(
     run_key = request.headers.get("X-Run-Id") or f"window:{now:%Y%m%d%H}{now.minute // 10}"
     if len(run_key) > 200:
         raise GatewayError(400, "invalid_run_id", "X-Run-Id is too long")
+    account = (
+        await session.get(ProviderAccount, (auth.client_id, provider))
+        if provider != "gemini"
+        else None
+    )
+    live = httpx.URL(url).host in ("api.openai.com", "api.anthropic.com")
+    required = live or os.environ.get("REQUIRE_PROVIDER_MAPPING", "false").lower() == "true"
+    if (
+        provider != "gemini"
+        and required
+        and (account is None or (live and account.validated_at is None))
+    ):
+        raise GatewayError(
+            503, "provider_account_unmapped", "A validated dedicated provider account is required"
+        )
     credential = (
         await session.execute(
             select(ProviderCredential).where(
                 ProviderCredential.client_id == auth.client_id,
                 ProviderCredential.provider == provider,
-                ProviderCredential.label == "default",
+                ProviderCredential.label == (account.credential_label if account else "default"),
             )
         )
     ).scalar_one_or_none()
@@ -99,6 +114,8 @@ async def proxy_native(
         "accept-encoding": "identity",
         **headers_for_key(key),
     }
+    if provider == "openai" and account is not None:
+        headers["OpenAI-Project"] = account.external_id
     budget = (await session.execute(select(Budget).where(Budget.id == held.budget_id))).scalar_one()
     run = (await session.execute(select(Run).where(Run.id == held.run_id))).scalar_one()
     remember(

@@ -65,3 +65,7 @@ The action lifecycle test verified proposed, approved, denied, and expired event
 ## T4.1 — 2026-10-06
 
 All six catalog models seeded idempotently with source URLs and UTC verification dates. Tests checked exact long-context and cache-TTL costs, admin authorization, invalid-rate rejection, and failure on unpriced hosted tools. All 47 tests passed against Postgres 16; ruff and mypy passed.
+
+## T4.2 — 2026-10-06
+
+Daily mock reporting compared OpenAI and Anthropic model usage and total costs with gateway events, including Anthropic cents conversion and filtering another workspace. The mapped OpenAI project header was verified; duplicate account assignments were rejected. A reporting outage recorded a failed job without replacing data with zeros. All 48 tests passed against Postgres 16; ruff, mypy, and Compose configuration checks passed. Live provider reporting remains pending organization credentials.

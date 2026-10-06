@@ -13,7 +13,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from approvals.human import router as human_router
 from approvals.service import Decision, decide
 from core.database import get_session
-from core.models import Budget, Client, KillFlag, Price, ProviderCredential, VirtualKey, Workflow
+from core.models import (
+    Budget,
+    Client,
+    KillFlag,
+    Price,
+    ProviderAccount,
+    ProviderCredential,
+    VirtualKey,
+    Workflow,
+)
 from core.security import encrypt_provider_key, generate_virtual_key, virtual_key_hash
 from gateway.errors import GatewayError, openai_error_handler
 
@@ -243,3 +252,68 @@ async def seed_prices(session: DbSession) -> dict[str, int]:
     from core.pricing import seed
 
     return {"models": await seed(session)}
+
+
+class AccountCreate(BaseModel):
+    client_id: uuid.UUID
+    provider: Literal["openai", "anthropic"]
+    external_id: str = Field(min_length=1)
+    credential_label: str = "default"
+    inference_key_id: str | None = None
+    validate_live: bool = True
+
+
+@app.post("/admin/provider-accounts", dependencies=[Depends(require_admin)], status_code=201)
+async def create_account(body: AccountCreate, session: DbSession) -> dict[str, Any]:
+    import httpx
+
+    validated = None
+    if body.validate_live:
+        key = os.environ.get(body.provider.upper() + "_ADMIN_KEY")
+        if not key:
+            raise HTTPException(503, "Provider reporting key is required to validate the account")
+        if body.provider == "anthropic" and not body.inference_key_id:
+            raise HTTPException(400, "Anthropic inference API key ID is required")
+        base = os.environ.get(
+            body.provider.upper() + "_REPORTING_BASE_URL",
+            "https://api.openai.com" if body.provider == "openai" else "https://api.anthropic.com",
+        ).rstrip("/")
+        path = (
+            "/v1/organization/projects/" + body.external_id
+            if body.provider == "openai"
+            else "/v1/organizations/api_keys/" + str(body.inference_key_id)
+        )
+        headers = (
+            {"authorization": "Bearer " + key}
+            if body.provider == "openai"
+            else {"x-api-key": key, "anthropic-version": "2023-06-01"}
+        )
+        try:
+            async with httpx.AsyncClient(timeout=15) as http:
+                response = await http.get(base + path, headers=headers)
+                response.raise_for_status()
+                if (
+                    body.provider == "anthropic"
+                    and response.json().get("workspace_id") != body.external_id
+                ):
+                    raise HTTPException(
+                        400, "Inference key does not belong to the mapped workspace"
+                    )
+        except httpx.HTTPError as exc:
+            raise HTTPException(503, "Provider account validation failed") from exc
+        validated = datetime.now(UTC)
+    session.add(
+        ProviderAccount(**body.model_dump(exclude={"validate_live"}), validated_at=validated)
+    )
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            409, "Provider account must be dedicated to exactly one client"
+        ) from exc
+    return {
+        "provider": body.provider,
+        "external_id": body.external_id,
+        "validated": validated is not None,
+    }
