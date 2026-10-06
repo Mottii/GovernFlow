@@ -6,12 +6,22 @@ from datetime import UTC, date, datetime
 import httpx
 import pytest
 import respx
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from audit.chain import verify_chain
 from core.database import get_session
-from core.models import Base, Budget, Client, Event, Price, ProviderCredential, VirtualKey, Workflow
+from core.models import (
+    Base,
+    Budget,
+    Client,
+    Event,
+    KillFlag,
+    Price,
+    ProviderCredential,
+    VirtualKey,
+    Workflow,
+)
 from core.security import encrypt_provider_key, virtual_key_hash
 from gateway.adapters.openai import chat_usage
 from gateway.app import app
@@ -27,6 +37,7 @@ async def test_chat_proxy_preserves_body_and_uses_provider_credential(
     monkeypatch.setenv("MASTER_ENCRYPTION_KEY", base64.b64encode(b"a" * 32).decode())
     monkeypatch.setenv("OPENAI_BASE_URL", "http://mock-provider:8002")
     monkeypatch.setenv("DEFAULT_MAX_OUTPUT_TOKENS", "16")
+    monkeypatch.setenv("KILL_CACHE_TTL_S", "0")
     engine = create_async_engine(url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with engine.begin() as conn:
@@ -71,6 +82,7 @@ async def test_chat_proxy_preserves_body_and_uses_provider_credential(
                 reasoning=1_000_000,
             )
         )
+        session.add(KillFlag(scope="global", scope_id="", active=True, reason="emergency"))
         await session.commit()
 
     async def test_session():  # type: ignore[no-untyped-def]
@@ -90,6 +102,43 @@ async def test_chat_proxy_preserves_body_and_uses_provider_credential(
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://gateway.test"
             ) as http:
+                killed = await http.post(
+                    "/v1/chat/completions",
+                    content=request_bytes,
+                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                )
+                async with factory() as session:
+                    await session.execute(
+                        update(KillFlag)
+                        .where(KillFlag.scope == "global")
+                        .values(active=False, reason=None)
+                    )
+                    await session.commit()
+                for scope, scope_id in (
+                    ("client", str(client.id)),
+                    ("workflow", str(workflow.id)),
+                ):
+                    async with factory() as session:
+                        session.add(
+                            KillFlag(scope=scope, scope_id=scope_id, active=True, reason="paused")
+                        )
+                        await session.commit()
+                    scope_killed = await http.post(
+                        "/v1/chat/completions",
+                        content=request_bytes,
+                        headers={
+                            "Authorization": f"Bearer {key}",
+                            "Content-Type": "application/json",
+                        },
+                    )
+                    assert scope_killed.status_code == 503
+                    async with factory() as session:
+                        await session.execute(
+                            update(KillFlag)
+                            .where(KillFlag.scope == scope, KillFlag.scope_id == scope_id)
+                            .values(active=False, reason=None)
+                        )
+                        await session.commit()
                 response = await http.post(
                     "/v1/chat/completions",
                     content=request_bytes,
@@ -101,6 +150,8 @@ async def test_chat_proxy_preserves_body_and_uses_provider_credential(
                     headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
                 )
             assert route.called
+            assert killed.status_code == 503
+            assert killed.json()["error"]["code"] == "workflow_killed"
             assert route.calls[0].request.content == request_bytes
             assert route.calls[0].request.headers["Authorization"] == "Bearer real-provider-key"
             assert response.status_code == 200

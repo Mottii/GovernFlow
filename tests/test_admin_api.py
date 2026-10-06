@@ -95,6 +95,13 @@ async def test_admin_creates_scoped_records_without_storing_plaintext(
                 f"/admin/keys/{created_key.json()['id']}", headers=headers
             )
             assert revoked.status_code == 204
+            killed = await client.post(
+                "/admin/kill",
+                json={"scope": "workflow", "scope_id": workflow_id, "active": True},
+                headers=headers,
+            )
+            assert killed.status_code == 200
+            assert killed.json()["active"] is True
             async with factory() as session:
                 assert (
                     await session.execute(select(VirtualKey))

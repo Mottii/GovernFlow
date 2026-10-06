@@ -16,6 +16,7 @@ from gateway.adapters.openai import chat_usage
 from gateway.auth import AuthContext, authenticate_openai
 from gateway.errors import GatewayError, openai_error_handler
 from policy.budget import cost_micro, current_price, estimate_micro, release, reserve, settle
+from policy.kill import check_kill
 
 app = FastAPI(title="Governed Automation Gateway")
 app.add_exception_handler(GatewayError, openai_error_handler)
@@ -32,6 +33,7 @@ async def chat_completions(
     auth: Annotated[AuthContext, Depends(authenticate_openai)],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> Response:
+    await check_kill(session, auth)
     body = await request.body()
     try:
         parsed: Any = json.loads(body)
