@@ -3,7 +3,52 @@ import respx
 from sqlalchemy import select, update
 
 from audit.chain import verify_chain
-from core.models import Alert, Budget, Event, KillFlag, Workflow
+from core.models import Alert, Budget, Event, KillFlag, Run, Workflow
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "policy",
+    [
+        {"per_run_micro": 45},
+        {"budget": {"per_run_micro": 45}},
+        {"per_run_micro": 45, "budget": {"per_run_micro": 1000}},
+        {"per_run_micro": 1000, "budget": {"per_run_micro": 45}},
+    ],
+)
+async def test_configured_per_run_budget_blocks_before_forwarding(governed, policy):
+    async with governed.factory() as session:
+        await session.execute(
+            update(Workflow)
+            .where(Workflow.id == governed.a.workflow.id)
+            .values(policy={"models": ["*"], **policy})
+        )
+        await session.commit()
+    with respx.mock(assert_all_called=True) as mock:
+        provider = mock.post("http://provider.test/v1/chat/completions").respond(
+            200, json={"usage": {"prompt_tokens": 12, "completion_tokens": 3}}
+        )
+        responses = [
+            await governed.http.post(
+                "/v1/chat/completions",
+                json={"model": "gpt-mock", "max_tokens": 16},
+                headers={"authorization": "Bearer " + governed.a.key, "X-Run-Id": "budget"},
+            )
+            for _ in range(4)
+        ]
+        assert [response.status_code for response in responses] == [200, 200, 429, 503]
+        assert provider.call_count == 2
+    async with governed.factory() as session:
+        run = (
+            await session.execute(select(Run).where(Run.workflow_id == governed.a.workflow.id))
+        ).scalar_one()
+        assert (run.cap_micro, run.cost_micro, run.reserved_micro) == (45, 30, 0)
+        budget = (
+            await session.execute(
+                select(Budget).where(Budget.workflow_id == governed.a.workflow.id)
+            )
+        ).scalar_one()
+        assert (budget.spent_micro, budget.reserved_micro) == (30, 0)
 
 
 @pytest.mark.asyncio

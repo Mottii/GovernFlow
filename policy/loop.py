@@ -23,6 +23,7 @@ def loop_policy(policy: dict[str, Any]) -> tuple[int, int, int]:
     if not isinstance(budget, dict) or not isinstance(loop, dict):
         raise GatewayError(503, "invalid_policy", "Budget or loop policy is invalid")
     cap = min(
+        positive(policy.get("per_run_micro", 2**63 - 1), "Per-run cap"),
         positive(budget.get("per_run_micro", 2**63 - 1), "Per-run cap"),
         positive(loop.get("run_cost_micro", 2**63 - 1), "Loop cost cap"),
     )
