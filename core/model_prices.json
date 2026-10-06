@@ -1,0 +1,11 @@
+{
+  "verified_at": "2026-10-06T00:00:00Z",
+  "prices": [
+    {"provider":"openai","model":"gpt-4.1-mini","input":400000,"output":1600000,"cache_read":100000,"cache_write":0,"cache_write_hour":0,"reasoning":1600000,"source_url":"https://developers.openai.com/api/docs/models/gpt-4.1-mini","meter":{"standard_only":true}},
+    {"provider":"openai","model":"gpt-6-sol","input":2000000,"output":10000000,"cache_read":200000,"cache_write":2500000,"cache_write_hour":0,"reasoning":10000000,"source_url":"https://developers.openai.com/api/docs/models/gpt-6-sol","meter":{"standard_only":true,"long_context":{"threshold_tokens":272000,"input_multiplier":[2,1],"output_multiplier":[3,2]}}},
+    {"provider":"openai","model":"text-embedding-3-small","input":20000,"output":0,"cache_read":0,"cache_write":0,"cache_write_hour":0,"reasoning":0,"source_url":"https://developers.openai.com/api/docs/models/text-embedding-3-small","meter":{"standard_only":true}},
+    {"provider":"anthropic","model":"claude-haiku-4-5","input":1000000,"output":5000000,"cache_read":100000,"cache_write":1250000,"cache_write_hour":2000000,"reasoning":5000000,"source_url":"https://platform.claude.com/docs/en/about-claude/pricing","meter":{"standard_only":true}},
+    {"provider":"anthropic","model":"claude-sonnet-5-5","input":2000000,"output":10000000,"cache_read":200000,"cache_write":2500000,"cache_write_hour":4000000,"reasoning":10000000,"source_url":"https://platform.claude.com/docs/en/about-claude/pricing","meter":{"standard_only":true}},
+    {"provider":"gemini","model":"gemini-3.5-flash-lite","input":300000,"output":2500000,"cache_read":30000,"cache_write":0,"cache_write_hour":0,"reasoning":2500000,"source_url":"https://ai.google.dev/gemini-api/docs/pricing","meter":{"standard_only":true}}
+  ]
+}

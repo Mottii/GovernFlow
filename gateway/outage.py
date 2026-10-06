@@ -17,6 +17,7 @@ from core.models import Price
 from core.security import virtual_key_hash
 from gateway.auth import AuthContext
 from gateway.errors import GatewayError
+from policy.billing import standard_meter
 from policy.budget import estimate_micro
 from policy.replay import enqueue, replace
 
@@ -93,6 +94,7 @@ async def forward(request: Request) -> Response | None:
             return None
     except (ValueError, AttributeError):
         return None
+    standard_meter(body, snapshot.price.provider, snapshot.price)
     cost = estimate_micro(body, maximum, snapshot.price)
     async with _lock:
         if (

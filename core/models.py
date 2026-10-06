@@ -201,6 +201,17 @@ class KillFlag(Base):
 
 class Price(Base):
     __tablename__ = "prices"
+    __table_args__ = (
+        CheckConstraint(
+            "input >= 0 AND output >= 0 AND cache_read >= 0 AND cache_write >= 0 "
+            "AND cache_write_hour >= 0 AND reasoning >= 0",
+            name="prices_nonnegative",
+        ),
+    )
+    source_url: Mapped[str | None] = mapped_column(Text)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    meter: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
+    cache_write_hour: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
 
     provider: Mapped[str] = mapped_column(Text, primary_key=True)
     model: Mapped[str] = mapped_column(Text, primary_key=True)

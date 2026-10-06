@@ -1,7 +1,7 @@
 import hmac
 import os
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from approvals.human import router as human_router
 from approvals.service import Decision, decide
 from core.database import get_session
-from core.models import Budget, Client, KillFlag, ProviderCredential, VirtualKey, Workflow
+from core.models import Budget, Client, KillFlag, Price, ProviderCredential, VirtualKey, Workflow
 from core.security import encrypt_provider_key, generate_virtual_key, virtual_key_hash
 from gateway.errors import GatewayError, openai_error_handler
 
@@ -191,3 +191,55 @@ async def action_decision(
     approval_id: uuid.UUID, body: Decision, session: DbSession
 ) -> dict[str, Any]:
     return await decide(session, approval_id, body)
+
+
+class PriceCreate(BaseModel):
+    provider: Literal["openai", "anthropic", "gemini"]
+    model: str = Field(min_length=1)
+    effective_from: date
+    input: int = Field(ge=0, le=10**12)
+    output: int = Field(ge=0, le=10**12)
+    cache_read: int = Field(default=0, ge=0, le=10**12)
+    cache_write: int = Field(default=0, ge=0, le=10**12)
+    cache_write_hour: int = Field(default=0, ge=0, le=10**12)
+    reasoning: int = Field(default=0, ge=0, le=10**12)
+    source_url: str = Field(pattern=r"^https://")
+    meter: dict[str, Any] = Field(default_factory=dict)
+
+
+@app.post("/admin/prices", dependencies=[Depends(require_admin)], status_code=201)
+async def create_price(body: PriceCreate, session: DbSession) -> dict[str, str]:
+    tier = body.meter.get("long_context")
+    if tier:
+        if (
+            not isinstance(tier, dict)
+            or not isinstance(tier.get("threshold_tokens"), int)
+            or tier["threshold_tokens"] <= 0
+        ):
+            raise HTTPException(400, "Long-context price threshold is invalid")
+        for name in ("input_multiplier", "output_multiplier"):
+            if (
+                not isinstance(tier.get(name), list)
+                or len(tier[name]) != 2
+                or any(
+                    isinstance(value, bool) or not isinstance(value, int) or value <= 0
+                    for value in tier[name]
+                )
+            ):
+                raise HTTPException(
+                    400, "Long-context multipliers must be positive integer fractions"
+                )
+    session.add(Price(**body.model_dump(), verified_at=datetime.now(UTC)))
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(409, "Price effective date already exists") from exc
+    return {"provider": body.provider, "model": body.model}
+
+
+@app.post("/admin/prices/seed", dependencies=[Depends(require_admin)])
+async def seed_prices(session: DbSession) -> dict[str, int]:
+    from core.pricing import seed
+
+    return {"models": await seed(session)}

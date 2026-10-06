@@ -61,3 +61,7 @@ Pending approvals expired exactly once, following deny or explicitly configured 
 ## Phase 3 / T3.6 — 2026-10-06
 
 The action lifecycle test verified proposed, approved, denied, and expired events in order, approver metadata, encrypted content, tenant chains, and detection of altered decision metadata. Earlier checks proved pending actions cannot execute and consumption is single use. All 46 tests passed against Postgres 16; ruff and mypy passed. Telegram, SMTP, and external webhook live delivery remain pending credentials; mock contracts passed.
+
+## T4.1 — 2026-10-06
+
+All six catalog models seeded idempotently with source URLs and UTC verification dates. Tests checked exact long-context and cache-TTL costs, admin authorization, invalid-rate rejection, and failure on unpriced hosted tools. All 47 tests passed against Postgres 16; ruff and mypy passed.

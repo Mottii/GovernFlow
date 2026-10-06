@@ -21,19 +21,21 @@ def chat_usage(body: dict[str, Any]) -> Usage | None:
         return None
     cached = input_details.get("cached_tokens", 0)
     reasoning = output_details.get("reasoning_tokens", 0)
+    cache_write = input_details.get("cache_write_tokens", 0)
     if (
         any(
             isinstance(value, bool) or not isinstance(value, int) or value < 0
-            for value in (cached, reasoning)
+            for value in (cached, reasoning, cache_write)
         )
-        or cached > input_total
+        or cached + cache_write > input_total
         or reasoning > output_total
     ):
         return None
     return Usage(
-        input=max(0, input_total - cached),
+        input=max(0, input_total - cached - cache_write),
         output=max(0, output_total - reasoning),
         cache_read=cached,
+        cache_write=cache_write,
         reasoning=reasoning,
         raw=raw,
     )

@@ -9,4 +9,5 @@ class Usage:
     cache_read: int = 0
     cache_write: int = 0
     reasoning: int = 0
+    cache_write_hour: int = 0
     raw: dict[str, Any] = field(default_factory=dict)

@@ -25,11 +25,22 @@ def message_usage(body: dict[str, Any]) -> Usage | None:
         for name in names
     ):
         return None
+    cache = raw.get("cache_creation") or {}
+    if not isinstance(cache, dict):
+        return None
+    hour = cache.get("ephemeral_1h_input_tokens", 0)
+    if (
+        isinstance(hour, bool)
+        or not isinstance(hour, int)
+        or not 0 <= hour <= raw.get("cache_creation_input_tokens", 0)
+    ):
+        return None
     return Usage(
         input=raw.get("input_tokens", 0),
         output=raw.get("output_tokens", 0),
         cache_read=raw.get("cache_read_input_tokens", 0),
-        cache_write=raw.get("cache_creation_input_tokens", 0),
+        cache_write=raw.get("cache_creation_input_tokens", 0) - hour,
+        cache_write_hour=hour,
         raw=raw,
     )
 

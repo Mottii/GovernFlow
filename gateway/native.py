@@ -23,6 +23,7 @@ from gateway.adapters.openai import ChatStreamTracker
 from gateway.auth import AuthContext
 from gateway.errors import GatewayError
 from gateway.outage import remember
+from policy.billing import standard_meter
 from policy.budget import cost_micro, current_price, estimate_micro, release, reserve, settle
 from policy.kill import check_kill
 from policy.loop import loop_policy
@@ -56,6 +57,7 @@ async def proxy_native(
     price = await current_price(session, provider, model)
     if price is None:
         raise GatewayError(400, "model_not_priced", "The model has no configured price")
+    standard_meter(body, provider, price)
     cap, max_steps, _ = loop_policy(auth.policy)
     now = datetime.now(UTC)
     run_key = request.headers.get("X-Run-Id") or f"window:{now:%Y%m%d%H}{now.minute // 10}"

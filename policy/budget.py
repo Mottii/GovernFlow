@@ -1,6 +1,7 @@
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from fractions import Fraction
 
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert
@@ -17,22 +18,38 @@ def ceil_div(numerator: int, denominator: int) -> int:
 
 
 def estimate_micro(request_body: bytes, max_output: int, price: Price) -> int:
-    estimated_input_tokens = ceil_div(len(request_body), 3)
+    estimated_input = ceil_div(len(request_body), 3)
+    base_input = max(price.input, price.cache_write, price.cache_write_hour)
     return max(
         1,
-        ceil_div(estimated_input_tokens * price.input, 1_000_000)
-        + ceil_div(max_output * price.output, 1_000_000),
+        bill(
+            estimated_input * base_input,
+            max_output * max(price.output, price.reasoning),
+            estimated_input,
+            price,
+        ),
     )
 
 
+def bill(input_charge: int, output_charge: int, input_tokens: int, price: Price) -> int:
+    tier = (price.meter or {}).get("long_context")
+    if tier and input_tokens > tier["threshold_tokens"]:
+        charge = input_charge * Fraction(*tier["input_multiplier"]) + output_charge * Fraction(
+            *tier["output_multiplier"]
+        )
+        return ceil_div(charge.numerator, charge.denominator * 1_000_000)
+    return ceil_div(input_charge + output_charge, 1_000_000)
+
+
 def cost_micro(usage: Usage, price: Price) -> int:
-    return ceil_div(
+    return bill(
         usage.input * price.input
-        + usage.output * price.output
         + usage.cache_read * price.cache_read
         + usage.cache_write * price.cache_write
-        + usage.reasoning * price.reasoning,
-        1_000_000,
+        + usage.cache_write_hour * price.cache_write_hour,
+        usage.output * price.output + usage.reasoning * price.reasoning,
+        usage.input + usage.cache_read + usage.cache_write + usage.cache_write_hour,
+        price,
     )
 
 
