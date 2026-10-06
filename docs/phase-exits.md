@@ -73,3 +73,7 @@ Daily mock reporting compared OpenAI and Anthropic model usage and total costs w
 ## T4.3 — 2026-10-06
 
 A mock provider call absent from the gateway triggered `possible_bypass` in one reconciliation run. Repeated refreshes produced one alert; a matching refresh resolved it and the audit chain verified. All 49 tests passed against Postgres 16; ruff and mypy passed.
+
+## T4.4 — 2026-10-06
+
+All 50 backend tests passed against Postgres 16, including role restrictions and foreign-client IDs on every admin read and mutation. Ruff and mypy passed. TypeScript and the Next.js production build passed. Two Playwright tests passed against the Compose backend: create key, native call, visible spend, workflow pause and gateway 503 within the propagation limit, mobile controls and sign out, and rejection of foreign-origin mutations. Desktop and mobile screenshots were visually reviewed. Live provider calls remain pending credentials.

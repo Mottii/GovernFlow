@@ -8,3 +8,8 @@ __pycache__/
 dashboard/node_modules/
 dashboard/.next/
 fail_open_queue/
+dashboard/test-results/
+dashboard/playwright-report/
+dashboard/*.tsbuildinfo
+.e2e.json
+.pnpm-store/

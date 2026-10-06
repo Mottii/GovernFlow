@@ -1,19 +1,21 @@
-import hmac
 import os
 import uuid
 from datetime import UTC, date, datetime
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException, status
+from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
+from admin_api.auth import Actor, DbSession, client_scope, permit, workflow_scope
+from admin_api.dashboard import router as dashboard_router
+from admin_api.users import router as users_router
 from approvals.human import router as human_router
 from approvals.service import Decision, decide
-from core.database import get_session
 from core.models import (
+    Approval,
     Budget,
     Client,
     KillFlag,
@@ -29,16 +31,20 @@ from gateway.errors import GatewayError, openai_error_handler
 app = FastAPI(title="Governed Automation Admin API")
 app.add_exception_handler(GatewayError, openai_error_handler)
 app.include_router(human_router)
-DbSession = Annotated[AsyncSession, Depends(get_session)]
+app.include_router(users_router)
+app.include_router(dashboard_router)
 
 
-async def require_admin(authorization: str | None = Header(default=None)) -> None:
-    expected = os.environ.get("ADMIN_TOKEN")
-    if not expected:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Admin token is not configured")
-    supplied = authorization.removeprefix("Bearer ") if authorization else ""
-    if not hmac.compare_digest(supplied, expected):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid admin token")
+@app.middleware("http")
+async def no_cache(request: Request, call_next: Any) -> Any:
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.exception_handler(DBAPIError)
+async def storage_unavailable(request: Request, exc: Exception) -> JSONResponse:
+    return JSONResponse(status_code=503, content={"detail": "Governance storage is unavailable"})
 
 
 class ClientCreate(BaseModel):
@@ -82,19 +88,26 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/admin/clients", dependencies=[Depends(require_admin)], status_code=201)
-async def create_client(body: ClientCreate, session: DbSession) -> dict[str, str | int]:
+@app.post("/admin/clients", status_code=201)
+async def create_client(
+    body: ClientCreate, session: DbSession, actor: Actor
+) -> dict[str, str | int]:
+    permit(actor, "admin")
     client = Client(name=body.name, retention_days=body.retention_days)
     session.add(client)
     await session.commit()
     return {"id": str(client.id), "name": client.name, "retention_days": client.retention_days}
 
 
-@app.post("/admin/workflows", dependencies=[Depends(require_admin)], status_code=201)
-async def create_workflow(body: WorkflowCreate, session: DbSession) -> dict[str, str]:
+@app.post("/admin/workflows", status_code=201)
+async def create_workflow(body: WorkflowCreate, session: DbSession, actor: Actor) -> dict[str, str]:
+    permit(actor, "admin", "operator")
+    client_scope(actor, body.client_id)
     outage = body.policy.get("outage", {})
     if not isinstance(outage, dict) or outage.get("mode", "closed") not in ("open", "closed"):
         raise HTTPException(400, "Outage policy is invalid")
+    if outage.get("mode") == "open":
+        permit(actor, "admin")
     if outage.get("mode") == "open" and body.risk_class not in ("R0", "R1"):
         raise HTTPException(400, "Fail open is available only for R0/R1 workflows")
     workflow = Workflow(
@@ -112,8 +125,12 @@ async def create_workflow(body: WorkflowCreate, session: DbSession) -> dict[str,
     return {"id": str(workflow.id), "client_id": str(workflow.client_id), "name": workflow.name}
 
 
-@app.post("/admin/budgets", dependencies=[Depends(require_admin)], status_code=201)
-async def create_budget(body: BudgetCreate, session: DbSession) -> dict[str, str | int]:
+@app.post("/admin/budgets", status_code=201)
+async def create_budget(
+    body: BudgetCreate, session: DbSession, actor: Actor
+) -> dict[str, str | int]:
+    permit(actor, "admin", "operator")
+    await workflow_scope(session, actor, body.workflow_id)
     budget = Budget(workflow_id=body.workflow_id, period=body.period, cap_micro=body.cap_micro)
     session.add(budget)
     try:
@@ -124,8 +141,12 @@ async def create_budget(body: BudgetCreate, session: DbSession) -> dict[str, str
     return {"id": str(budget.id), "period": budget.period, "cap_micro": budget.cap_micro}
 
 
-@app.post("/admin/provider-credentials", dependencies=[Depends(require_admin)], status_code=201)
-async def create_provider_credential(body: CredentialCreate, session: DbSession) -> dict[str, str]:
+@app.post("/admin/provider-credentials", status_code=201)
+async def create_provider_credential(
+    body: CredentialCreate, session: DbSession, actor: Actor
+) -> dict[str, str]:
+    permit(actor, "admin", "operator")
+    client_scope(actor, body.client_id)
     ciphertext, nonce = encrypt_provider_key(body.key, body.client_id, body.provider, body.label)
     credential = ProviderCredential(
         client_id=body.client_id,
@@ -143,8 +164,10 @@ async def create_provider_credential(body: CredentialCreate, session: DbSession)
     return {"id": str(credential.id), "provider": credential.provider, "label": credential.label}
 
 
-@app.post("/admin/keys", dependencies=[Depends(require_admin)], status_code=201)
-async def create_key(body: KeyCreate, session: DbSession) -> dict[str, str]:
+@app.post("/admin/keys", status_code=201)
+async def create_key(body: KeyCreate, session: DbSession, actor: Actor) -> dict[str, str]:
+    permit(actor, "admin", "operator")
+    await workflow_scope(session, actor, body.workflow_id)
     plaintext = generate_virtual_key()
     record = VirtualKey(
         workflow_id=body.workflow_id,
@@ -160,24 +183,35 @@ async def create_key(body: KeyCreate, session: DbSession) -> dict[str, str]:
     return {"id": str(record.id), "key": plaintext, "prefix": record.prefix}
 
 
-@app.delete("/admin/keys/{key_id}", dependencies=[Depends(require_admin)], status_code=204)
-async def revoke_key(key_id: uuid.UUID, session: DbSession) -> None:
+@app.delete("/admin/keys/{key_id}", status_code=204)
+async def revoke_key(key_id: uuid.UUID, session: DbSession, actor: Actor) -> None:
     record = await session.get(VirtualKey, key_id)
     if record is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Virtual key not found")
+    permit(actor, "admin", "operator")
+    await workflow_scope(session, actor, record.workflow_id)
     record.revoked_at = datetime.now(UTC)
     await session.commit()
 
 
-@app.post("/admin/kill", dependencies=[Depends(require_admin)])
-async def change_kill_flag(body: KillChange, session: DbSession) -> dict[str, str | bool]:
+@app.post("/admin/kill")
+async def change_kill_flag(
+    body: KillChange, session: DbSession, actor: Actor
+) -> dict[str, str | bool]:
+    permit(actor, "admin", "operator")
+    if body.scope == "global":
+        permit(actor, "admin")
     if body.scope == "global" and body.scope_id:
         raise HTTPException(400, "Global scope_id must be empty")
     if body.scope != "global":
         try:
-            uuid.UUID(body.scope_id)
+            body = body.model_copy(update={"scope_id": str(uuid.UUID(body.scope_id))})
         except ValueError as exc:
             raise HTTPException(400, "Client and workflow scope_id must be a UUID") from exc
+    if body.scope == "client":
+        client_scope(actor, uuid.UUID(body.scope_id))
+    elif body.scope == "workflow":
+        await workflow_scope(session, actor, uuid.UUID(body.scope_id))
     await session.execute(
         insert(KillFlag)
         .values(
@@ -195,10 +229,17 @@ async def change_kill_flag(body: KillChange, session: DbSession) -> dict[str, st
     return {"scope": body.scope, "scope_id": body.scope_id, "active": body.active}
 
 
-@app.post("/admin/actions/{approval_id}/decision", dependencies=[Depends(require_admin)])
+@app.post("/admin/actions/{approval_id}/decision")
 async def action_decision(
-    approval_id: uuid.UUID, body: Decision, session: DbSession
+    approval_id: uuid.UUID, body: Decision, session: DbSession, actor: Actor
 ) -> dict[str, Any]:
+    permit(actor, "admin", "approver")
+    approval = await session.get(Approval, approval_id)
+    if approval is None:
+        raise HTTPException(404, "Approval not found")
+    await workflow_scope(session, actor, approval.workflow_id)
+    if actor.user_id:
+        body = body.model_copy(update={"approver": actor.email})
     return await decide(session, approval_id, body)
 
 
@@ -216,8 +257,9 @@ class PriceCreate(BaseModel):
     meter: dict[str, Any] = Field(default_factory=dict)
 
 
-@app.post("/admin/prices", dependencies=[Depends(require_admin)], status_code=201)
-async def create_price(body: PriceCreate, session: DbSession) -> dict[str, str]:
+@app.post("/admin/prices", status_code=201)
+async def create_price(body: PriceCreate, session: DbSession, actor: Actor) -> dict[str, str]:
+    permit(actor, "admin")
     tier = body.meter.get("long_context")
     if tier:
         if (
@@ -247,8 +289,9 @@ async def create_price(body: PriceCreate, session: DbSession) -> dict[str, str]:
     return {"provider": body.provider, "model": body.model}
 
 
-@app.post("/admin/prices/seed", dependencies=[Depends(require_admin)])
-async def seed_prices(session: DbSession) -> dict[str, int]:
+@app.post("/admin/prices/seed")
+async def seed_prices(session: DbSession, actor: Actor) -> dict[str, int]:
+    permit(actor, "admin")
     from core.pricing import seed
 
     return {"models": await seed(session)}
@@ -257,14 +300,16 @@ async def seed_prices(session: DbSession) -> dict[str, int]:
 class AccountCreate(BaseModel):
     client_id: uuid.UUID
     provider: Literal["openai", "anthropic"]
-    external_id: str = Field(min_length=1)
+    external_id: str = Field(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9_-]+$")
     credential_label: str = "default"
-    inference_key_id: str | None = None
+    inference_key_id: str | None = Field(default=None, max_length=200, pattern=r"^[A-Za-z0-9_-]+$")
     validate_live: bool = True
 
 
-@app.post("/admin/provider-accounts", dependencies=[Depends(require_admin)], status_code=201)
-async def create_account(body: AccountCreate, session: DbSession) -> dict[str, Any]:
+@app.post("/admin/provider-accounts", status_code=201)
+async def create_account(body: AccountCreate, session: DbSession, actor: Actor) -> dict[str, Any]:
+    permit(actor, "admin", "operator")
+    client_scope(actor, body.client_id)
     import httpx
 
     validated = None
@@ -292,6 +337,11 @@ async def create_account(body: AccountCreate, session: DbSession) -> dict[str, A
             async with httpx.AsyncClient(timeout=15) as http:
                 response = await http.get(base + path, headers=headers)
                 response.raise_for_status()
+                if body.provider == "openai" and (
+                    response.json().get("id") != body.external_id
+                    or response.json().get("status") == "archived"
+                ):
+                    raise HTTPException(400, "OpenAI project is invalid or archived")
                 if (
                     body.provider == "anthropic"
                     and response.json().get("workspace_id") != body.external_id
