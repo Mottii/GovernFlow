@@ -63,7 +63,7 @@ services:
         condition: service_healthy
   approval-notifier:
     build: .
-    command: sh -c "while true; do python -m approvals.notifications; sleep 30; done"
+    command: sh -c "while true; do python -m approvals.expiry; python -m approvals.notifications; sleep 30; done"
     environment:
       DATABASE_URL: postgresql+asyncpg://gateway:${POSTGRES_PASSWORD:-local_only_password}@postgres:5432/gateway
       MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY:-}

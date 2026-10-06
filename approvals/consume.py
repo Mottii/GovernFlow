@@ -47,7 +47,10 @@ async def consume(session: AsyncSession, auth: AuthContext, body: ActionConsume)
         or not hmac.compare_digest(record.action_hash, action_hash(body.action_name, body.action))
     ):
         raise GatewayError(403, "action_mismatch", "Execution token does not match the action")
-    if record.status != "approved" or record.consumed_at is not None:
+    timeout_allow = (
+        record.status == "expired" and record.timeout_outcome == "allow" and auth.risk_class < "R2"
+    )
+    if (record.status != "approved" and not timeout_allow) or record.consumed_at is not None:
         raise GatewayError(409, "approval_not_usable", "Approval is not usable")
     record.consumed_at = datetime.now(UTC)
     await append_event(

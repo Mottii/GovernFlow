@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from approvals.expiry import expire_record
 from approvals.signing import sign
 from audit.chain import AuditEventInput, append_event
 from core.models import Approval, Notification, Workflow
@@ -53,8 +54,16 @@ def view(record: Approval) -> dict[str, Any]:
         else "pending",
         "expires_at": record.expires_at.isoformat(),
     }
-    if record.status == "approved" and record.decided_at:
-        expiry = min(record.expires_at, record.decided_at + timedelta(minutes=15))
+    if record.status == "expired" and record.timeout_outcome == "allow":
+        result["decision"] = "allow"
+    if (
+        record.status == "approved"
+        or record.status == "expired"
+        and record.timeout_outcome == "allow"
+    ) and record.decided_at:
+        expiry = record.decided_at + timedelta(minutes=15)
+        if record.status == "approved":
+            expiry = min(record.expires_at, expiry)
         if record.consumed_at is not None or expiry <= datetime.now(UTC):
             result["decision"] = "deny"
             result["reason"] = "consumed" if record.consumed_at else "token_expired"
@@ -117,6 +126,10 @@ async def check(session: AsyncSession, auth: AuthContext, body: ActionCheck) -> 
         raise GatewayError(503, "invalid_policy", "Action timeout is invalid")
     if outcome not in ("allow", "deny") or (outcome == "allow" and risk >= "R2"):
         raise GatewayError(503, "invalid_policy", "High-risk actions must deny on timeout")
+    require_approval = rule.get("require_approval", False)
+    if not isinstance(require_approval, bool):
+        raise GatewayError(503, "invalid_policy", "require_approval must be boolean")
+    automatic = risk < "R2" and not require_approval
     now = datetime.now(UTC)
     record = Approval(
         id=uuid.uuid4(),
@@ -124,11 +137,11 @@ async def check(session: AsyncSession, auth: AuthContext, body: ActionCheck) -> 
         action_name=body.action_name,
         action_hash=action_hash(body.action_name, body.action),
         action_summary=body.summary,
-        status="approved" if risk < "R2" else "pending",
+        status="approved" if automatic else "pending",
         expires_at=now + timedelta(seconds=timeout),
         timeout_outcome=outcome,
-        approver="policy" if risk < "R2" else None,
-        decided_at=now if risk < "R2" else None,
+        approver="policy" if automatic else None,
+        decided_at=now if automatic else None,
     )
     record.content_ciphertext, record.content_nonce = encrypt_provider_key(
         json.dumps(body.action, allow_nan=False), auth.client_id, "action", str(record.id)
@@ -179,7 +192,9 @@ async def decide(session: AsyncSession, approval_id: uuid.UUID, body: Decision) 
     ).scalar_one_or_none()
     if record is None:
         raise GatewayError(404, "approval_not_found", "Approval was not found")
-    if record.status != "pending" or record.expires_at <= datetime.now(UTC):
+    if await expire_record(session, record):
+        await session.commit()
+    if record.status != "pending":
         raise GatewayError(409, "approval_not_pending", "Approval is no longer pending")
     record.status = "approved" if body.decision == "approve" else "denied"
     record.approver = body.approver

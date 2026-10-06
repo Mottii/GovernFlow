@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from approvals.consume import ActionConsume, consume
+from approvals.expiry import expire_pending
 from approvals.service import ActionCheck, check, scoped, view
 from core.database import get_session
 from gateway.auth import AuthContext, authenticate_openai
@@ -23,7 +24,9 @@ async def check_action(body: ActionCheck, auth: Auth, session: Db) -> dict[str, 
 @router.get("/v1/actions/{approval_id}")
 async def poll_action(approval_id: uuid.UUID, auth: Auth, session: Db) -> dict[str, Any]:
     await check_kill(session, auth)
-    return view(await scoped(session, auth, approval_id))
+    record = await scoped(session, auth, approval_id)
+    await expire_pending(session, approval_id)
+    return view(record)
 
 
 @router.post("/v1/actions/consume")

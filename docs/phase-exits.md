@@ -53,3 +53,7 @@ SMTP and webhook mocks received full action content and review links. Incoming w
 ## T3.4 — 2026-10-06
 
 Twenty concurrent consumptions admitted exactly one execution. Altered actions, foreign workflows, and changed signatures were rejected. Python and JavaScript wrappers blocked pending actions and consumed approval before execution. All 41 backend tests passed against Postgres 16; the Node test, ruff, and backend/SDK mypy passed. The PDF's local HMAC verification instruction is corrected in `docs/decisions.md`.
+
+## T3.5 — 2026-10-06
+
+Pending approvals expired exactly once, following deny or explicitly configured low-risk allow outcomes. High-risk timeout allow was rejected. All 45 tests passed against Postgres 16; ruff, mypy, and Compose checks passed.
