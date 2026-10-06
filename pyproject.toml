@@ -18,6 +18,7 @@ dependencies = [
 dev = [
   "anthropic>=1.11.0",
   "mypy>=1.18,<2",
+  "openai>=3.24.0",
   "pytest>=8.4,<9",
   "pytest-asyncio>=1.2,<2",
   "respx>=0.22,<1",

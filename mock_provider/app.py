@@ -95,3 +95,75 @@ async def anthropic_messages(request: Request) -> Response:
 
         return StreamingResponse(chunks(), media_type="text/event-stream")
     return Response(json.dumps(message, separators=(",", ":")), media_type="application/json")
+
+
+@app.post("/v1/responses")
+async def openai_responses(request: Request) -> Response:
+    body = await request.json()
+    response = {
+        "id": "resp_mock",
+        "object": "response",
+        "created_at": 1,
+        "status": "completed",
+        "model": body["model"],
+        "output": [
+            {
+                "id": "msg_mock",
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "mock reply", "annotations": []}],
+            }
+        ],
+        "usage": {
+            "input_tokens": 12,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens": 3,
+            "output_tokens_details": {"reasoning_tokens": 0},
+            "total_tokens": 15,
+        },
+    }
+    if body.get("stream"):
+
+        async def chunks() -> AsyncIterator[bytes]:
+            events = [
+                (
+                    "response.created",
+                    {
+                        "type": "response.created",
+                        "response": {
+                            **response,
+                            "status": "in_progress",
+                            "output": [],
+                            "usage": None,
+                        },
+                    },
+                ),
+                (
+                    "response.output_text.delta",
+                    {
+                        "type": "response.output_text.delta",
+                        "output_index": 0,
+                        "content_index": 0,
+                        "delta": "mock reply",
+                    },
+                ),
+                ("response.completed", {"type": "response.completed", "response": response}),
+            ]
+            for name, data in events:
+                yield f"event: {name}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n".encode()
+
+        return StreamingResponse(chunks(), media_type="text/event-stream")
+    return Response(json.dumps(response, separators=(",", ":")), media_type="application/json")
+
+
+@app.post("/v1/embeddings")
+async def openai_embeddings(request: Request) -> Response:
+    body = await request.json()
+    response = {
+        "object": "list",
+        "data": [{"object": "embedding", "embedding": [0.1, 0.2, 0.3], "index": 0}],
+        "model": body["model"],
+        "usage": {"prompt_tokens": 2, "total_tokens": 2},
+    }
+    return Response(json.dumps(response, separators=(",", ":")), media_type="application/json")
