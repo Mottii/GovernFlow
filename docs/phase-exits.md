@@ -45,3 +45,7 @@ Checks exercised all four risk classes, strict unknown-action denial, human appr
 ## T3.2 — 2026-10-06
 
 The mocked Telegram Bot API received the summary, action content, and signed approve/deny callbacks. Review HTML escaped script content. Unauthorized callbacks were rejected, an authorized callback approved the action, and replay returned 409. All 39 tests passed against Postgres 16; ruff, mypy, and Compose checks passed. Live Telegram delivery is pending credentials; see `docs/live-setup.md`.
+
+## T3.3 — 2026-10-06
+
+SMTP and webhook mocks received full action content and review links. Incoming webhook decisions accepted a valid signature and rejected missing signatures, altered bodies, stale timestamps, and reused event IDs. All 40 tests passed against Postgres 16; ruff, mypy, and Compose checks passed. SMTP and external webhook delivery remain untested live.

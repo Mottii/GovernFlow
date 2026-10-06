@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import os
+import smtplib
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -14,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from approvals.service import content
 from approvals.signing import b64, secret, sign
 from core.models import Alert, Approval, Notification, Workflow
+from gateway.errors import GatewayError
 
 
 def chat_ids() -> list[str]:
@@ -111,12 +113,13 @@ async def dispatch(session: AsyncSession) -> int:
             )
         ).scalar_one()
         try:
-            if item.channel != "telegram":
-                raise RuntimeError("Channel is not configured")
-            await telegram(approval, content(approval, client_id))
+            from approvals.channels import email, webhook
+
+            senders = {"telegram": telegram, "email": email, "webhook": webhook}
+            await senders[item.channel](approval, content(approval, client_id))
             item.status = "sent"
             sent += 1
-        except (httpx.HTTPError, RuntimeError):
+        except (httpx.HTTPError, RuntimeError, smtplib.SMTPException, OSError, GatewayError):
             if item.attempts == 0:
                 session.add(
                     Alert(

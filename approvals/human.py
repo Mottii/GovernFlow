@@ -102,3 +102,30 @@ async def review_decision(approval_id: uuid.UUID, request: Request, session: Db)
             decision="approve" if choice == "approve" else "deny", approver=payload["channel"]
         ),
     )
+
+
+@router.post("/integrations/webhook/decision")
+async def webhook_decision(request: Request, session: Db) -> dict[str, Any]:
+    from sqlalchemy.exc import IntegrityError
+
+    from approvals.channels import verify_signature
+    from core.models import WebhookReceipt
+
+    raw = await request.body()
+    verify_signature(
+        request.headers.get("x-gas-timestamp", ""), raw, request.headers.get("x-gas-signature", "")
+    )
+    try:
+        payload = json.loads(raw)
+        identity = uuid.UUID(payload["event_id"])
+        approval_id = uuid.UUID(payload["approval_id"])
+        body = Decision.model_validate(payload)
+    except (ValueError, KeyError, TypeError) as exc:
+        raise GatewayError(400, "invalid_webhook", "Webhook decision is invalid") from exc
+    session.add(WebhookReceipt(id=identity))
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise GatewayError(409, "webhook_replayed", "Webhook event was already processed") from exc
+    return await decide(session, approval_id, body)
