@@ -2,3 +2,4 @@
 
 - T1.1: `uv` pins Python dependencies. FastAPI and uvicorn serve the native HTTP endpoints; httpx handles asynchronous upstream forwarding; SQLAlchemy, asyncpg, and Alembic manage Postgres; pydantic-settings validates environment configuration; cryptography provides AES-GCM. pytest, pytest-asyncio, and respx test async calls; ruff and mypy run in CI. Each dependency is required by the blueprint's fixed stack.
 - T1.1: The administrative API uses a separate ASGI app and port so proxy credentials cannot access its routes.
+- T1.2: Migration 0001 follows section 18.4. The PDF's approvals status check is truncated, so the migration completes it with `expired`, which section 18.6 requires. `pgcrypto` supplies `gen_random_uuid()` on older local Postgres; Postgres 16 also accepts it.
