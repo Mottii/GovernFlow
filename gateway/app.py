@@ -6,8 +6,11 @@ from typing import Annotated, Any
 
 import httpx
 from fastapi import Depends, FastAPI, Request, Response
+from fastapi.exceptions import RequestValidationError
 from sqlalchemy import select
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+from starlette.exceptions import HTTPException
 
 from audit.chain import AuditEventInput
 from core.database import get_session
@@ -16,7 +19,13 @@ from core.security import decrypt_provider_key
 from gateway.adapters.openai import chat_usage
 from gateway.anthropic import router as anthropic_router
 from gateway.auth import AuthContext, authenticate_openai
-from gateway.errors import GatewayError, openai_error_handler
+from gateway.errors import (
+    GatewayError,
+    database_error_handler,
+    http_error_handler,
+    openai_error_handler,
+    validation_error_handler,
+)
 from gateway.gemini import router as gemini_router
 from gateway.openai_more import router as openai_more_router
 from gateway.streaming import stream_openai_chat
@@ -25,6 +34,9 @@ from policy.kill import check_kill
 
 app = FastAPI(title="Governed Automation Gateway")
 app.add_exception_handler(GatewayError, openai_error_handler)
+app.add_exception_handler(DBAPIError, database_error_handler)
+app.add_exception_handler(RequestValidationError, validation_error_handler)
+app.add_exception_handler(HTTPException, http_error_handler)
 app.include_router(anthropic_router)
 app.include_router(openai_more_router)
 app.include_router(gemini_router)

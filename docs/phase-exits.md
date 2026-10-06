@@ -21,3 +21,7 @@ The official OpenAI Python SDK completed normal and streamed Responses and an em
 ## T2.3 — 2026-10-06
 
 Plain HTTP tests completed Gemini generation, SSE streaming, and JSON-array streaming through the gateway. Requests and returned bytes matched the fixtures exactly, provider authentication was replaced, and all three calls settled their usage. The full suite passed with 19 tests; ruff and mypy passed. Contracts follow https://ai.google.dev/api/generate-content and https://ai.google.dev/api.
+
+## T2.4 — 2026-10-06
+
+The error matrix checks authentication, malformed requests, budget rejection, kill flags, upstream timeout, native upstream rejection, and storage outages on all five provider endpoints. Reservations returned to zero and error messages did not expose provider credentials or database details. All 21 tests, ruff, and mypy passed.
