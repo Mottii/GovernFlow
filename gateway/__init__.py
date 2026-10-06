@@ -1,0 +1,1 @@
+"""Provider-compatible gateway endpoints."""

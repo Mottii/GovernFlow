@@ -1,0 +1,10 @@
+.git
+.env
+.venv
+Claude.pdf
+dashboard/node_modules
+dashboard/.next
+__pycache__
+.pytest_cache
+.mypy_cache
+.ruff_cache
