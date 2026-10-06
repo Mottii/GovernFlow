@@ -4,3 +4,4 @@
 - T1.1: The administrative API uses a separate ASGI app and port so proxy credentials cannot access its routes.
 - T1.2: Migration 0001 follows section 18.4. The PDF's approvals status check is truncated, so the migration completes it with `expired`, which section 18.6 requires. `pgcrypto` supplies `gen_random_uuid()` on older local Postgres; Postgres 16 also accepts it.
 - T1.3: Provider keys use AES-GCM with client, provider, and label as associated data. Virtual keys are random `gk_` strings stored only as SHA-256 hashes and shown once at creation. The phase-1 admin API requires `ADMIN_TOKEN` and runs on its own port.
+- T1.4: Authentication resolves the client and workflow with one scoped query and rejects revoked keys or inactive tenants. The public proxy uses provider-shaped errors rather than FastAPI's default `detail` wrapper.
