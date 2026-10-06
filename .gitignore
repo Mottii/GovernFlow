@@ -1,4 +1,14 @@
 .env
+.env.*
+!.env.example
+.secrets
+.secrets.*
+secrets/
+credentials/
+*.pem
+*.key
+*.p12
+*.pfx
 .venv/
 __pycache__/
 .pytest_cache/
@@ -13,3 +23,4 @@ dashboard/playwright-report/
 dashboard/*.tsbuildinfo
 .e2e.json
 .pnpm-store/
+.DS_Store

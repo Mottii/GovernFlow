@@ -1,4 +1,14 @@
 node_modules
+.env
+.env.*
+.secrets
+.secrets.*
+secrets
+credentials
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
 .next
 test-results
 playwright-report

@@ -1,6 +1,8 @@
-# Governed Automation Starter
+# GovernFlow
 
-Section 18 of `Claude.pdf`, phases 1–4: a native provider gateway with budget reservations, approval tokens, append-only audit chains, reconciliation, and a role-based Next.js dashboard. The phase-5 live client pilot is outside this delivery.
+GovernFlow is an open-source governance gateway for AI workflows. It adds budget reservations, action approvals, append-only audit chains, provider reconciliation, and a role-based Next.js dashboard while preserving native provider formats.
+
+The implementation follows section 18 of `Claude.pdf`, phases 1–4. The phase-5 live client pilot is outside this delivery. Automated mock checks pass; live provider and notification verification is still pending credentials. See [acceptance evidence](docs/phase-exits.md).
 
 ## Start locally
 
@@ -12,7 +14,7 @@ Requires Docker with a running daemon, Python 3.12, and `uv`.
 4. Run `docker compose run --rm gateway alembic upgrade head` and `docker compose run --rm gateway python -m core.pricing`.
 5. Run `docker compose up -d`.
 6. Set `DASHBOARD_ADMIN_EMAIL` and a password of at least 12 characters in `.env`, then run `uv run python scripts/bootstrap_admin.py`.
-7. Open [the dashboard](http://localhost:3000). The current development workspace already has an administrator; its email and password are in the ignored `.env`.
+7. Open [the dashboard](http://localhost:3000) and sign in with the email and password you configured.
 
 | Service | Local URL |
 |---|---|
@@ -41,3 +43,13 @@ Defaults fail closed. Explicit R0/R1 fail open is limited to known replica snaps
 In `dashboard/`, use Node 22 and pnpm 11.19.0: `pnpm install --frozen-lockfile`, `pnpm typecheck`, `pnpm build`. Browser acceptance instructions are in [dashboard setup](docs/dashboard.md). JavaScript wrapper checks: `node --test sdks/javascript/index.test.mjs`.
 
 [Acceptance evidence](docs/phase-exits.md) distinguishes passed mock checks from pending live checks. Telegram, SMTP, webhook delivery, and real provider reporting remain pending external credentials and reachable integration endpoints.
+
+## Contributing
+
+Contributions are welcome through issues and pull requests. Follow [CONTRIBUTING.md](CONTRIBUTING.md) for setup, test commands, and review expectations. CI checks backend contracts, the dashboard, and Git history for credentials. Keep real keys, database exports, and approval content out of commits and test fixtures.
+
+For vulnerability reports, see [SECURITY.md](SECURITY.md).
+
+## License
+
+GovernFlow is available under the [MIT license](LICENSE).

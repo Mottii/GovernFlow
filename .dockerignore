@@ -1,5 +1,14 @@
 .git
 .env
+.env.*
+.secrets
+.secrets.*
+secrets
+credentials
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
 .venv
 Claude.pdf
 dashboard/node_modules
