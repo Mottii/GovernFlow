@@ -91,6 +91,10 @@ async def governed(monkeypatch: pytest.MonkeyPatch, tmp_path):
         async with factory() as session:
             yield session
 
+    from admin_api.app import app as admin_app
+
+    monkeypatch.setenv("ADMIN_TOKEN", "test-admin")
+    admin_app.dependency_overrides[get_session] = test_session
     app.dependency_overrides[get_session] = test_session
     try:
         async with httpx.AsyncClient(
@@ -99,6 +103,7 @@ async def governed(monkeypatch: pytest.MonkeyPatch, tmp_path):
             yield SimpleNamespace(http=http, factory=factory, a=tenants[0], b=tenants[1])
     finally:
         app.dependency_overrides.clear()
+        admin_app.dependency_overrides.clear()
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)
         await engine.dispose()

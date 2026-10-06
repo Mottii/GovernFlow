@@ -11,6 +11,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.exceptions import HTTPException
 
+from approvals.routes import router as approval_router
 from core.database import get_session
 from core.models import Price
 from gateway.adapters.openai import ChatStreamTracker, chat_usage
@@ -37,6 +38,7 @@ app.add_exception_handler(HTTPException, http_error_handler)
 app.include_router(anthropic_router)
 app.include_router(openai_more_router)
 app.include_router(gemini_router)
+app.include_router(approval_router)
 
 
 @app.get("/health")

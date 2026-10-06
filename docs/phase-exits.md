@@ -37,3 +37,7 @@ Fifteen-call soak tests stopped at configured step, run-cost, and loop-RPM thres
 ## Phase 2 / T2.7 — 2026-10-06
 
 The recorded mock contract matrix passes official OpenAI and Anthropic SDKs for plain and streamed endpoints, native tool bodies, long output, Gemini HTTP, and per-tenant upstream credentials. A simulated socket interruption settled an explicitly estimated charge and released its reservation. Fail-open eligibility, expiry, durable accounting, and single replay passed; all other workflows failed closed. All 37 tests passed against the running Docker Postgres 16, including the 200-call budget race and migration round trip. Ruff, mypy, and Compose configuration checks passed. Live provider captures remain pending credentials.
+
+## T3.1 — 2026-10-06
+
+Checks exercised all four risk classes, strict unknown-action denial, human approval and poll, unauthorized decision rejection, repeated decision rejection, and foreign-tenant approval IDs. All 38 tests passed against Postgres 16; ruff and mypy passed.

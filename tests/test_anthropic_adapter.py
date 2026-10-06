@@ -23,8 +23,7 @@ def test_anthropic_stream_uses_final_cumulative_usage() -> None:
         b'{"input_tokens":25,"output_tokens":1}}}\n\n'
     )
     tracker.feed(
-        b'event: message_delta\ndata: {"type":"message_delta","usage":'
-        b'{"output_tokens":15}}\n\n'
+        b'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":15}}\n\n'
     )
     assert tracker.usage is None
     tracker.feed(b'event: message_stop\ndata: {"type":"message_stop"}\n\n')

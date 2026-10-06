@@ -214,7 +214,10 @@ class Price(Base):
 
 class Approval(Base):
     __tablename__ = "approvals"
-    __table_args__ = (CheckConstraint("status IN ('pending','approved','denied','expired')"),)
+    __table_args__ = (
+        CheckConstraint("status IN ('pending','approved','denied','expired')"),
+        CheckConstraint("timeout_outcome IN ('allow','deny')", name="approval_timeout_outcome"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
@@ -223,6 +226,9 @@ class Approval(Base):
         UUID(as_uuid=True), ForeignKey("workflows.id"), nullable=False
     )
     run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    content_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary)
+    content_nonce: Mapped[bytes | None] = mapped_column(LargeBinary)
+    timeout_outcome: Mapped[str] = mapped_column(Text, nullable=False, server_default="deny")
     action_name: Mapped[str] = mapped_column(Text, nullable=False)
     action_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     action_summary: Mapped[str] = mapped_column(Text, nullable=False)
