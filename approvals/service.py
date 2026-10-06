@@ -105,6 +105,11 @@ async def check(session: AsyncSession, auth: AuthContext, body: ActionCheck) -> 
             AuditEventInput(
                 auth.client_id,
                 "action_denied",
+                usage={
+                    "workflow_id": str(auth.workflow_id),
+                    "action_name": body.action_name,
+                    "reason": "unknown_action",
+                },
                 content_ref="action-hash:" + action_hash(body.action_name, body.action).hex(),
             ),
         )
@@ -150,14 +155,29 @@ async def check(session: AsyncSession, auth: AuthContext, body: ActionCheck) -> 
     await append_event(
         session,
         AuditEventInput(
-            auth.client_id, "action_proposed", content_ref="approval:" + str(record.id)
+            auth.client_id,
+            "action_proposed",
+            usage={
+                "workflow_id": str(auth.workflow_id),
+                "risk_class": risk,
+                "action_name": body.action_name,
+                "action_hash": record.action_hash.hex(),
+            },
+            content_ref="approval:" + str(record.id),
         ),
     )
     if record.status == "approved":
         await append_event(
             session,
             AuditEventInput(
-                auth.client_id, "action_approved", content_ref="approval:" + str(record.id)
+                auth.client_id,
+                "action_approved",
+                usage={
+                    "workflow_id": str(auth.workflow_id),
+                    "approver": "policy",
+                    "action_hash": record.action_hash.hex(),
+                },
+                content_ref="approval:" + str(record.id),
             ),
         )
     if record.status == "pending":
@@ -205,7 +225,14 @@ async def decide(session: AsyncSession, approval_id: uuid.UUID, body: Decision) 
     await append_event(
         session,
         AuditEventInput(
-            client_id, "action_" + record.status, content_ref="approval:" + str(record.id)
+            client_id,
+            "action_" + record.status,
+            usage={
+                "workflow_id": str(record.workflow_id),
+                "approver": record.approver,
+                "action_hash": record.action_hash.hex(),
+            },
+            content_ref="approval:" + str(record.id),
         ),
     )
     await session.commit()

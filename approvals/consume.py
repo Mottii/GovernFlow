@@ -56,7 +56,10 @@ async def consume(session: AsyncSession, auth: AuthContext, body: ActionConsume)
     await append_event(
         session,
         AuditEventInput(
-            auth.client_id, "action_consumed", content_ref="approval:" + str(record.id)
+            auth.client_id,
+            "action_consumed",
+            usage={"workflow_id": str(auth.workflow_id), "action_hash": record.action_hash.hex()},
+            content_ref="approval:" + str(record.id),
         ),
     )
     await session.commit()

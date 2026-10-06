@@ -57,3 +57,7 @@ Twenty concurrent consumptions admitted exactly one execution. Altered actions, 
 ## T3.5 — 2026-10-06
 
 Pending approvals expired exactly once, following deny or explicitly configured low-risk allow outcomes. High-risk timeout allow was rejected. All 45 tests passed against Postgres 16; ruff, mypy, and Compose checks passed.
+
+## Phase 3 / T3.6 — 2026-10-06
+
+The action lifecycle test verified proposed, approved, denied, and expired events in order, approver metadata, encrypted content, tenant chains, and detection of altered decision metadata. Earlier checks proved pending actions cannot execute and consumption is single use. All 46 tests passed against Postgres 16; ruff and mypy passed. Telegram, SMTP, and external webhook live delivery remain pending credentials; mock contracts passed.
