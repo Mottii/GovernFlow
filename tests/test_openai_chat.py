@@ -154,6 +154,9 @@ async def test_chat_proxy_preserves_body_and_uses_provider_credential(
                             .values(active=False, reason=None)
                         )
                         await session.commit()
+                models_response = await http.get(
+                    "/v1/models", headers={"Authorization": f"Bearer {key}"}
+                )
                 response = await http.post(
                     "/v1/chat/completions",
                     content=request_bytes,
@@ -187,6 +190,8 @@ async def test_chat_proxy_preserves_body_and_uses_provider_credential(
                     headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
                 )
             assert route.called
+            assert models_response.status_code == 200
+            assert models_response.json()["data"][0]["id"] == "gpt-mock"
             assert killed.status_code == 503
             assert killed.json()["error"]["code"] == "workflow_killed"
             assert route.calls[0].request.content == request_bytes

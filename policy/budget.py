@@ -66,6 +66,23 @@ async def reserve(
     per_run_cap_micro: int,
 ) -> HeldReservation | None:
     period = datetime.now(UTC).strftime("%Y-%m")
+    # Settlement takes the budget row before the run row. Reserve in that
+    # order too, otherwise concurrent calls can deadlock with settlements.
+    budget_id = (
+        await session.execute(
+            update(Budget)
+            .where(
+                Budget.workflow_id == workflow_id,
+                Budget.period == period,
+                Budget.spent_micro + Budget.reserved_micro + est_micro <= Budget.cap_micro,
+            )
+            .values(reserved_micro=Budget.reserved_micro + est_micro)
+            .returning(Budget.id)
+        )
+    ).scalar_one_or_none()
+    if budget_id is None:
+        await session.rollback()
+        return None
     await session.execute(
         insert(Run)
         .values(
@@ -95,21 +112,6 @@ async def reserve(
         )
     ).scalar_one_or_none()
     if accepted_run is None:
-        await session.rollback()
-        return None
-    budget_id = (
-        await session.execute(
-            update(Budget)
-            .where(
-                Budget.workflow_id == workflow_id,
-                Budget.period == period,
-                Budget.spent_micro + Budget.reserved_micro + est_micro <= Budget.cap_micro,
-            )
-            .values(reserved_micro=Budget.reserved_micro + est_micro)
-            .returning(Budget.id)
-        )
-    ).scalar_one_or_none()
-    if budget_id is None:
         await session.rollback()
         return None
     record = Reservation(budget_id=budget_id, run_id=run_id, est_micro=est_micro)

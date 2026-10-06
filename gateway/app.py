@@ -1,6 +1,7 @@
 import json
 import os
 from datetime import UTC, datetime
+from fnmatch import fnmatchcase
 from typing import Annotated, Any
 
 import httpx
@@ -10,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from audit.chain import AuditEventInput
 from core.database import get_session
-from core.models import ProviderCredential
+from core.models import Price, ProviderCredential
 from core.security import decrypt_provider_key
 from gateway.adapters.openai import chat_usage
 from gateway.auth import AuthContext, authenticate_openai
@@ -26,6 +27,33 @@ app.add_exception_handler(GatewayError, openai_error_handler)
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/v1/models")
+async def list_models(
+    auth: Annotated[AuthContext, Depends(authenticate_openai)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> dict[str, Any]:
+    await check_kill(session, auth)
+    allowed = auth.policy.get("models", ["*"])
+    if not isinstance(allowed, list) or not all(isinstance(item, str) for item in allowed):
+        raise GatewayError(503, "invalid_policy", "Model allowlist is not configured correctly")
+    names = (
+        await session.execute(
+            select(Price.model)
+            .where(Price.provider == "openai", Price.effective_from <= datetime.now(UTC).date())
+            .distinct()
+            .order_by(Price.model)
+        )
+    ).scalars()
+    return {
+        "object": "list",
+        "data": [
+            {"id": name, "object": "model", "created": 0, "owned_by": "openai"}
+            for name in names
+            if any(fnmatchcase(name, pattern) for pattern in allowed)
+        ],
+    }
 
 
 @app.post("/v1/chat/completions")
@@ -157,6 +185,7 @@ async def chat_completions(
         raise GatewayError(502, "upstream_unavailable", "Upstream provider is unavailable") from exc
     finally:
         if not completed:
+            await session.rollback()
             await release(
                 session,
                 held,
