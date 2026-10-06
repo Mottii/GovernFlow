@@ -21,6 +21,7 @@ services:
       MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY:-}
       OPENAI_BASE_URL: http://mock-provider:8002
       ANTHROPIC_BASE_URL: http://mock-provider:8002
+      GEMINI_BASE_URL: http://mock-provider:8002
       UPSTREAM_TIMEOUT_S: ${UPSTREAM_TIMEOUT_S:-120}
     ports:
       - "8000:8000"

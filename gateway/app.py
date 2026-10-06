@@ -17,6 +17,7 @@ from gateway.adapters.openai import chat_usage
 from gateway.anthropic import router as anthropic_router
 from gateway.auth import AuthContext, authenticate_openai
 from gateway.errors import GatewayError, openai_error_handler
+from gateway.gemini import router as gemini_router
 from gateway.openai_more import router as openai_more_router
 from gateway.streaming import stream_openai_chat
 from policy.budget import cost_micro, current_price, estimate_micro, release, reserve, settle
@@ -26,6 +27,7 @@ app = FastAPI(title="Governed Automation Gateway")
 app.add_exception_handler(GatewayError, openai_error_handler)
 app.include_router(anthropic_router)
 app.include_router(openai_more_router)
+app.include_router(gemini_router)
 
 
 @app.get("/health")

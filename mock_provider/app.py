@@ -167,3 +167,26 @@ async def openai_embeddings(request: Request) -> Response:
         "usage": {"prompt_tokens": 2, "total_tokens": 2},
     }
     return Response(json.dumps(response, separators=(",", ":")), media_type="application/json")
+
+
+@app.post("/{version}/models/{model_action}")
+async def gemini_content(version: str, model_action: str, request: Request) -> Response:
+    response = {
+        "candidates": [
+            {
+                "content": {"role": "model", "parts": [{"text": "mock reply"}]},
+                "finishReason": "STOP",
+                "index": 0,
+            }
+        ],
+        "usageMetadata": {"promptTokenCount": 12, "candidatesTokenCount": 3, "totalTokenCount": 15},
+        "modelVersion": model_action.split(":")[0],
+    }
+    if model_action.endswith(":streamGenerateContent"):
+        payload = json.dumps(response, separators=(",", ":")).encode()
+        if request.query_params.get("alt") == "sse":
+            return StreamingResponse(
+                iter([b"data: " + payload + b"\n\n"]), media_type="text/event-stream"
+            )
+        return StreamingResponse(iter([b"[" + payload + b"]"]), media_type="application/json")
+    return Response(json.dumps(response, separators=(",", ":")), media_type="application/json")

@@ -13,3 +13,11 @@ The three reservations left by the failed pre-fix run were aged in the isolated 
 ## T2.1 — 2026-10-06
 
 The official Anthropic Python SDK completed a non-streaming Messages call and a streamed Messages call against the gateway and mock provider. Both returned `mock reply` with 12 input and 3 output tokens. The adapter tests cover cache normalization, cumulative streamed usage, and an interrupted stream without final usage. The full suite passed with 14 tests; ruff and mypy passed.
+
+## T2.2 — 2026-10-06
+
+The official OpenAI Python SDK completed normal and streamed Responses and an embeddings request against the Compose gateway and mock provider. All 17 tests, ruff, and mypy passed.
+
+## T2.3 — 2026-10-06
+
+Plain HTTP tests completed Gemini generation, SSE streaming, and JSON-array streaming through the gateway. Requests and returned bytes matched the fixtures exactly, provider authentication was replaced, and all three calls settled their usage. The full suite passed with 19 tests; ruff and mypy passed. Contracts follow https://ai.google.dev/api/generate-content and https://ai.google.dev/api.
