@@ -43,8 +43,12 @@ class MessageStreamTracker:
 
     def feed(self, chunk: bytes) -> None:
         self._buffer += chunk
-        while b"\n\n" in self._buffer:
-            frame, self._buffer = self._buffer.split(b"\n\n", 1)
+        while True:
+            lf, crlf = self._buffer.find(b"\n\n"), self._buffer.find(b"\r\n\r\n")
+            if lf < 0 and crlf < 0:
+                break
+            end = lf + 2 if lf >= 0 and (crlf < 0 or lf < crlf) else crlf + 4
+            frame, self._buffer = self._buffer[:end], self._buffer[end:]
             data = b"\n".join(
                 line.removeprefix(b"data:").lstrip()
                 for line in frame.splitlines()

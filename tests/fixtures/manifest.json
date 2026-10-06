@@ -1,0 +1,12 @@
+{
+  "recorded": "2026-10-06",
+  "origin": "local deterministic mock, no live provider calls",
+  "references": [
+    "https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events",
+    "https://developers.openai.com/api/reference/resources/responses/streaming-events",
+    "https://developers.openai.com/api/reference/resources/embeddings/methods/create",
+    "https://platform.claude.com/docs/en/api/messages/create",
+    "https://platform.claude.com/docs/en/build-with-claude/streaming",
+    "https://ai.google.dev/api/generate-content"
+  ]
+}

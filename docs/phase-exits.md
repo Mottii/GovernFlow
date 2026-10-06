@@ -33,3 +33,7 @@ All native routes rejected disallowed models with 403 and rate-limited calls wit
 ## T2.6 — 2026-10-06
 
 Fifteen-call soak tests stopped at configured step, run-cost, and loop-RPM thresholds, then returned kill responses. Alerts and audit chains verified. A provider charge of 1,000 micro-USD above its reservation was recorded in full and the next call was blocked. All 27 tests, ruff, and mypy passed.
+
+## Phase 2 / T2.7 — 2026-10-06
+
+The recorded mock contract matrix passes official OpenAI and Anthropic SDKs for plain and streamed endpoints, native tool bodies, long output, Gemini HTTP, and per-tenant upstream credentials. A simulated socket interruption settled an explicitly estimated charge and released its reservation. Fail-open eligibility, expiry, durable accounting, and single replay passed; all other workflows failed closed. All 37 tests passed against the running Docker Postgres 16, including the 200-call budget race and migration round trip. Ruff, mypy, and Compose configuration checks passed. Live provider captures remain pending credentials.

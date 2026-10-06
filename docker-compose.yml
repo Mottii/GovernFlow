@@ -19,12 +19,15 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://gateway:${POSTGRES_PASSWORD:-local_only_password}@postgres:5432/gateway
       MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY:-}
-      OPENAI_BASE_URL: http://mock-provider:8002
-      ANTHROPIC_BASE_URL: http://mock-provider:8002
-      GEMINI_BASE_URL: http://mock-provider:8002
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-http://mock-provider:8002}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-http://mock-provider:8002}
+      GEMINI_BASE_URL: ${GEMINI_BASE_URL:-http://mock-provider:8002}
+      REPLAY_QUEUE_PATH: /queue/replay.sqlite3
       UPSTREAM_TIMEOUT_S: ${UPSTREAM_TIMEOUT_S:-120}
     ports:
       - "8000:8000"
+    volumes:
+      - replay_queue:/queue
     depends_on:
       postgres:
         condition: service_healthy
@@ -44,9 +47,12 @@ services:
         condition: service_healthy
   reservation-reaper:
     build: .
-    command: sh -c "while true; do python -m policy.reap; sleep 86400; done"
+    command: sh -c "while true; do python -m policy.reap; python -m policy.replay; sleep 60; done"
     environment:
       DATABASE_URL: postgresql+asyncpg://gateway:${POSTGRES_PASSWORD:-local_only_password}@postgres:5432/gateway
+      REPLAY_QUEUE_PATH: /queue/replay.sqlite3
+    volumes:
+      - replay_queue:/queue
     depends_on:
       postgres:
         condition: service_healthy
@@ -57,3 +63,4 @@ services:
       - "8002:8002"
 volumes:
   postgres_data:
+  replay_queue:

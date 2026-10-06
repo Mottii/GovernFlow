@@ -1,4 +1,4 @@
-from fastapi import Request
+from fastapi import Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import DBAPIError
@@ -72,8 +72,18 @@ async def openai_error_handler(request: Request, exc: Exception) -> JSONResponse
     return error_response(request, exc)
 
 
-async def database_error_handler(request: Request, exc: Exception) -> JSONResponse:
+async def database_error_handler(request: Request, exc: Exception) -> Response:
     assert isinstance(exc, DBAPIError)
+    from gateway.outage import forward
+
+    try:
+        response = await forward(request)
+        if response is not None:
+            return response
+    except GatewayError as error:
+        return error_response(request, error)
+    except OSError:
+        pass
     return error_response(
         request, GatewayError(503, "governance_unavailable", "Governance storage is unavailable")
     )

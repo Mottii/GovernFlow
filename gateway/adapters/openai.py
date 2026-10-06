@@ -8,10 +8,28 @@ def chat_usage(body: dict[str, Any]) -> Usage | None:
     raw = body.get("usage")
     if not isinstance(raw, dict):
         return None
-    input_total = int(raw.get("prompt_tokens", 0))
-    output_total = int(raw.get("completion_tokens", 0))
-    cached = int((raw.get("prompt_tokens_details") or {}).get("cached_tokens", 0))
-    reasoning = int((raw.get("completion_tokens_details") or {}).get("reasoning_tokens", 0))
+    if any(
+        isinstance(raw.get(name), bool) or not isinstance(raw.get(name), int) or raw[name] < 0
+        for name in ("prompt_tokens", "completion_tokens")
+    ):
+        return None
+    input_total = raw["prompt_tokens"]
+    output_total = raw["completion_tokens"]
+    input_details = raw.get("prompt_tokens_details") or {}
+    output_details = raw.get("completion_tokens_details") or {}
+    if not isinstance(input_details, dict) or not isinstance(output_details, dict):
+        return None
+    cached = input_details.get("cached_tokens", 0)
+    reasoning = output_details.get("reasoning_tokens", 0)
+    if (
+        any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in (cached, reasoning)
+        )
+        or cached > input_total
+        or reasoning > output_total
+    ):
+        return None
     return Usage(
         input=max(0, input_total - cached),
         output=max(0, output_total - reasoning),

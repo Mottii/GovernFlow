@@ -1,0 +1,19 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "object": "embedding",
+      "embedding": [
+        0.1,
+        0.2,
+        0.3
+      ],
+      "index": 0
+    }
+  ],
+  "model": "text-embedding-mock",
+  "usage": {
+    "prompt_tokens": 2,
+    "total_tokens": 2
+  }
+}

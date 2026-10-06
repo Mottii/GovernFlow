@@ -1,31 +1,37 @@
 """Shared reservation and byte-preserving relay for native provider routes."""
 
 import asyncio
+import json
 import os
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
 import httpx
+from cryptography.exceptions import InvalidTag
 from fastapi import Request, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from audit.chain import AuditEventInput
-from core.models import ProviderCredential
+from core.models import Budget, ProviderCredential, Run
 from core.security import decrypt_provider_key
 from core.usage import Usage
+from gateway.adapters.openai import ChatStreamTracker
 from gateway.auth import AuthContext
 from gateway.errors import GatewayError
+from gateway.outage import remember
 from policy.budget import cost_micro, current_price, estimate_micro, release, reserve, settle
 from policy.kill import check_kill
 from policy.loop import loop_policy
+from policy.replay import enqueue
 from policy.traffic import check_traffic
 
 
 class Tracker(Protocol):
-    def feed(self, chunk: bytes) -> None: ...
+    def feed(self, chunk: bytes) -> object: ...
     @property
     def usage(self) -> Usage | None: ...
 
@@ -66,13 +72,18 @@ async def proxy_native(
     ).scalar_one_or_none()
     if credential is None:
         raise GatewayError(503, "provider_not_configured", "Provider credential is not configured")
-    key = decrypt_provider_key(
-        credential.ciphertext,
-        credential.nonce,
-        credential.client_id,
-        credential.provider,
-        credential.label,
-    )
+    try:
+        key = decrypt_provider_key(
+            credential.ciphertext,
+            credential.nonce,
+            credential.client_id,
+            credential.provider,
+            credential.label,
+        )
+    except (InvalidTag, RuntimeError, UnicodeDecodeError) as exc:
+        raise GatewayError(
+            503, "credential_unavailable", "Provider credential cannot be decrypted"
+        ) from exc
     held = await reserve(
         session, auth.workflow_id, run_key, estimate_micro(body, max_output, price), cap, max_steps
     )
@@ -86,7 +97,31 @@ async def proxy_native(
         "accept-encoding": "identity",
         **headers_for_key(key),
     }
-    upstream_request = http.build_request("POST", url, content=body, headers=headers)
+    budget = (await session.execute(select(Budget).where(Budget.id == held.budget_id))).scalar_one()
+    run = (await session.execute(select(Run).where(Run.id == held.run_id))).scalar_one()
+    remember(
+        request,
+        auth,
+        price,
+        headers,
+        url,
+        min(
+            budget.cap_micro - budget.spent_micro - budget.reserved_micro,
+            run.cap_micro - run.cost_micro - run.reserved_micro,
+        ),
+    )
+    upstream_body = body
+    if stream and isinstance(tracker, ChatStreamTracker):
+        parsed = json.loads(body)
+        options = parsed.get("stream_options") or {}
+        if options.get("include_usage") is not True:
+            tracker.suppress_injected_usage = True
+            upstream_body = json.dumps(
+                {**parsed, "stream_options": {**options, "include_usage": True}},
+                separators=(",", ":"),
+            ).encode()
+    upstream_request = http.build_request("POST", url, content=upstream_body, headers=headers)
+    request.state.upstream_started = True
     try:
         upstream = await http.send(upstream_request, stream=stream)
     except (httpx.TimeoutException, httpx.RequestError) as exc:
@@ -115,20 +150,37 @@ async def proxy_native(
 
     async def finalize(usage: Usage | None) -> None:
         actual = cost_micro(usage, price) if usage is not None else held.est_micro
-        async with factory() as final_session:
-            await settle(
-                final_session,
-                held,
-                actual,
-                AuditEventInput(
-                    client_id=auth.client_id,
-                    type="provider_call",
-                    provider=provider,
-                    model=model,
-                    usage=usage.raw if usage is not None else None,
-                    cost_micro=actual,
-                    estimated=usage is None,
-                ),
+        try:
+            async with factory() as final_session:
+                await settle(
+                    final_session,
+                    held,
+                    actual,
+                    AuditEventInput(
+                        client_id=auth.client_id,
+                        type="provider_call",
+                        provider=provider,
+                        model=model,
+                        usage=usage.raw if usage is not None else None,
+                        cost_micro=actual,
+                        estimated=usage is None,
+                    ),
+                )
+        except DBAPIError:
+            await enqueue(
+                {
+                    "client_id": str(auth.client_id),
+                    "workflow_id": str(auth.workflow_id),
+                    "provider": provider,
+                    "model": model,
+                    "cost_micro": actual,
+                    "held": {
+                        "id": str(held.id),
+                        "budget_id": str(held.budget_id),
+                        "run_id": str(held.run_id),
+                        "est_micro": held.est_micro,
+                    },
+                }
             )
 
     if stream:
@@ -136,12 +188,24 @@ async def proxy_native(
         async def chunks() -> AsyncIterator[bytes]:
             try:
                 async for chunk in upstream.aiter_raw():
-                    tracker.feed(chunk)
-                    yield chunk
+                    if isinstance(tracker, ChatStreamTracker):
+                        for frame in tracker.feed(chunk):
+                            yield frame
+                    else:
+                        tracker.feed(chunk)
+                        yield chunk
+                if isinstance(tracker, ChatStreamTracker):
+                    remaining = tracker.flush()
+                    if remaining:
+                        yield remaining
             finally:
-                await upstream.aclose()
-                await http.aclose()
-                await asyncio.shield(asyncio.create_task(finalize(tracker.usage)))
+
+                async def finish() -> None:
+                    await upstream.aclose()
+                    await http.aclose()
+                    await finalize(tracker.usage)
+
+                await asyncio.shield(asyncio.create_task(finish()))
 
         return StreamingResponse(
             chunks(), status_code=upstream.status_code, headers=response_headers

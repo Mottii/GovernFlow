@@ -78,6 +78,11 @@ async def create_client(body: ClientCreate, session: DbSession) -> dict[str, str
 
 @app.post("/admin/workflows", dependencies=[Depends(require_admin)], status_code=201)
 async def create_workflow(body: WorkflowCreate, session: DbSession) -> dict[str, str]:
+    outage = body.policy.get("outage", {})
+    if not isinstance(outage, dict) or outage.get("mode", "closed") not in ("open", "closed"):
+        raise HTTPException(400, "Outage policy is invalid")
+    if outage.get("mode") == "open" and body.risk_class not in ("R0", "R1"):
+        raise HTTPException(400, "Fail open is available only for R0/R1 workflows")
     workflow = Workflow(
         client_id=body.client_id,
         name=body.name,

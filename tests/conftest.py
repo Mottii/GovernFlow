@@ -15,7 +15,11 @@ from gateway.app import app
 
 
 @pytest_asyncio.fixture
-async def governed(monkeypatch: pytest.MonkeyPatch):
+async def governed(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    monkeypatch.setenv("REPLAY_QUEUE_PATH", str(tmp_path / "replay.sqlite3"))
+    from gateway.outage import _cache
+
+    _cache.clear()
     url = os.environ.get("APP_TEST_DATABASE_URL")
     if not url:
         pytest.skip("APP_TEST_DATABASE_URL is required")
