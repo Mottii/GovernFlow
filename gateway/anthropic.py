@@ -31,6 +31,7 @@ from policy.budget import (
     settle,
 )
 from policy.kill import check_kill
+from policy.traffic import check_traffic
 
 router = APIRouter()
 
@@ -146,6 +147,7 @@ async def messages(
     if not isinstance(parsed, dict) or not isinstance(parsed.get("model"), str):
         raise GatewayError(400, "invalid_request", "A model is required")
     model = parsed["model"]
+    await check_traffic(session, auth, model)
     max_output = parsed.get("max_tokens")
     if isinstance(max_output, bool) or not isinstance(max_output, int) or max_output <= 0:
         raise GatewayError(400, "invalid_max_tokens", "max_tokens must be positive")

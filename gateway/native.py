@@ -20,6 +20,7 @@ from gateway.auth import AuthContext
 from gateway.errors import GatewayError
 from policy.budget import cost_micro, current_price, estimate_micro, release, reserve, settle
 from policy.kill import check_kill
+from policy.traffic import check_traffic
 
 
 class Tracker(Protocol):
@@ -43,6 +44,7 @@ async def proxy_native(
     tracker: Tracker,
 ) -> Response:
     await check_kill(session, auth)
+    await check_traffic(session, auth, model)
     body = await request.body()
     price = await current_price(session, provider, model)
     if price is None:

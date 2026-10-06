@@ -31,6 +31,7 @@ from gateway.openai_more import router as openai_more_router
 from gateway.streaming import stream_openai_chat
 from policy.budget import cost_micro, current_price, estimate_micro, release, reserve, settle
 from policy.kill import check_kill
+from policy.traffic import allowed_models, check_traffic
 
 app = FastAPI(title="Governed Automation Gateway")
 app.add_exception_handler(GatewayError, openai_error_handler)
@@ -53,9 +54,7 @@ async def list_models(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict[str, Any]:
     await check_kill(session, auth)
-    allowed = auth.policy.get("models", ["*"])
-    if not isinstance(allowed, list) or not all(isinstance(item, str) for item in allowed):
-        raise GatewayError(503, "invalid_policy", "Model allowlist is not configured correctly")
+    allowed = allowed_models(auth)
     names = (
         await session.execute(
             select(Price.model)
@@ -95,6 +94,7 @@ async def chat_completions(
     ):
         raise GatewayError(400, "invalid_stream_options", "stream_options must be an object")
     model = parsed["model"]
+    await check_traffic(session, auth, model)
     price = await current_price(session, "openai", model)
     if price is None:
         raise GatewayError(400, "model_not_priced", "The model has no configured price")

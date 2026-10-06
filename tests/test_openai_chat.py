@@ -47,7 +47,9 @@ async def test_chat_proxy_preserves_body_and_uses_provider_credential(
         client = Client(name="Acme")
         session.add(client)
         await session.flush()
-        workflow = Workflow(client_id=client.id, name="chat", risk_class="R0", policy={})
+        workflow = Workflow(
+            client_id=client.id, name="chat", risk_class="R0", policy={"models": ["gpt-mock"]}
+        )
         session.add(workflow)
         await session.flush()
         session.add(

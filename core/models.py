@@ -233,3 +233,14 @@ class Approval(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class RateBucket(Base):
+    __tablename__ = "rate_buckets"
+    __table_args__ = (CheckConstraint("count > 0"),)
+
+    workflow_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workflows.id"), primary_key=True
+    )
+    minute: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    count: Mapped[int] = mapped_column(Integer, nullable=False)

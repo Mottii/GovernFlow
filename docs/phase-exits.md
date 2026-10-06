@@ -25,3 +25,7 @@ Plain HTTP tests completed Gemini generation, SSE streaming, and JSON-array stre
 ## T2.4 — 2026-10-06
 
 The error matrix checks authentication, malformed requests, budget rejection, kill flags, upstream timeout, native upstream rejection, and storage outages on all five provider endpoints. Reservations returned to zero and error messages did not expose provider credentials or database details. All 21 tests, ruff, and mypy passed.
+
+## T2.5 — 2026-10-06
+
+All native routes rejected disallowed models with 403 and rate-limited calls with 429 and `Retry-After`. Fifty concurrent calls sharing a workflow admitted exactly seven at an RPM cap of seven. All 23 tests, ruff, and mypy passed, including migration upgrade/downgrade and the 200-call budget race.
