@@ -114,6 +114,10 @@ class Budget(Base):
 
 class Run(Base):
     __tablename__ = "runs"
+    __table_args__ = (
+        Index("runs_workflow_external_idx", "workflow_id", "external_run_id", unique=True),
+        CheckConstraint("reserved_micro >= 0", name="runs_reserved_nonnegative"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
@@ -129,6 +133,36 @@ class Run(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="running")
     step_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     cost_micro: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    reserved_micro: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    cap_micro: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default="9223372036854775807"
+    )
+
+
+class Reservation(Base):
+    __tablename__ = "reservations"
+    __table_args__ = (
+        CheckConstraint("est_micro > 0"),
+        CheckConstraint("status IN ('reserved','settled','released')"),
+        Index("reservations_status_created_idx", "status", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    budget_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("budgets.id"), nullable=False
+    )
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("runs.id"), nullable=False
+    )
+    est_micro: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    actual_micro: Mapped[int | None] = mapped_column(BigInteger)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="reserved")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Event(Base):

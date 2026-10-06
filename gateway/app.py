@@ -1,5 +1,6 @@
 import json
 import os
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 import httpx
@@ -13,6 +14,7 @@ from core.security import decrypt_provider_key
 from gateway.adapters.openai import chat_usage
 from gateway.auth import AuthContext, authenticate_openai
 from gateway.errors import GatewayError, openai_error_handler
+from policy.budget import cost_micro, current_price, estimate_micro, release, reserve, settle
 
 app = FastAPI(title="Governed Automation Gateway")
 app.add_exception_handler(GatewayError, openai_error_handler)
@@ -39,6 +41,26 @@ async def chat_completions(
     if parsed.get("stream"):
         raise GatewayError(501, "stream_not_available", "Streaming is not implemented yet")
 
+    model = parsed["model"]
+    price = await current_price(session, "openai", model)
+    if price is None:
+        raise GatewayError(400, "model_not_priced", "The model has no configured price")
+    max_output = parsed.get("max_completion_tokens", parsed.get("max_tokens"))
+    if max_output is None:
+        max_output = int(os.environ.get("DEFAULT_MAX_OUTPUT_TOKENS", "4096"))
+    if isinstance(max_output, bool) or not isinstance(max_output, int) or max_output <= 0:
+        raise GatewayError(400, "invalid_max_tokens", "Output token limit must be positive")
+    budget_policy = auth.policy.get("budget", {})
+    per_run_cap = budget_policy.get("per_run_micro", 2**63 - 1)
+    if isinstance(per_run_cap, bool) or not isinstance(per_run_cap, int) or per_run_cap <= 0:
+        raise GatewayError(503, "invalid_policy", "Per-run cap is not configured correctly")
+    now = datetime.now(UTC)
+    run_key = request.headers.get("X-Run-Id")
+    if not run_key:
+        run_key = f"window:{now:%Y%m%d%H}{now.minute // 10}"
+    if len(run_key) > 200:
+        raise GatewayError(400, "invalid_run_id", "X-Run-Id is too long")
+
     credential = (
         await session.execute(
             select(ProviderCredential).where(
@@ -59,6 +81,16 @@ async def chat_completions(
     )
     base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com").rstrip("/")
     timeout = float(os.environ.get("UPSTREAM_TIMEOUT_S", "120"))
+    held = await reserve(
+        session,
+        auth.workflow_id,
+        run_key,
+        estimate_micro(body, max_output, price),
+        per_run_cap,
+    )
+    if held is None:
+        raise GatewayError(429, "budget_exceeded", "Workflow budget exceeded")
+    completed = False
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             upstream = await client.post(
@@ -70,18 +102,25 @@ async def chat_completions(
                     "Accept-Encoding": "identity",
                 },
             )
+        if upstream.status_code < 400:
+            usage = None
+            try:
+                response_body = upstream.json()
+                if isinstance(response_body, dict):
+                    usage = chat_usage(response_body)
+            except ValueError:
+                pass
+            actual = cost_micro(usage, price) if usage is not None else held.est_micro
+            completed = await settle(session, held, actual)
+            if not completed:
+                raise GatewayError(500, "settlement_failed", "Could not settle reservation")
     except httpx.TimeoutException as exc:
         raise GatewayError(504, "upstream_timeout", "Upstream provider timed out") from exc
     except httpx.RequestError as exc:
         raise GatewayError(502, "upstream_unavailable", "Upstream provider is unavailable") from exc
-
-    if upstream.status_code < 400:
-        try:
-            response_body = upstream.json()
-            if isinstance(response_body, dict):
-                chat_usage(response_body)
-        except ValueError:
-            pass
+    finally:
+        if not completed:
+            await release(session, held)
     response_headers: dict[str, str] = {}
     for header in ("content-type", "x-request-id", "retry-after"):
         if header in upstream.headers:

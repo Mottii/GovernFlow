@@ -1,14 +1,16 @@
 import base64
 import json
 import os
+from datetime import UTC, date, datetime
 
 import httpx
 import pytest
 import respx
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from core.database import get_session
-from core.models import Base, Client, ProviderCredential, VirtualKey, Workflow
+from core.models import Base, Budget, Client, Price, ProviderCredential, VirtualKey, Workflow
 from core.security import encrypt_provider_key, virtual_key_hash
 from gateway.adapters.openai import chat_usage
 from gateway.app import app
@@ -23,6 +25,7 @@ async def test_chat_proxy_preserves_body_and_uses_provider_credential(
         pytest.skip("APP_TEST_DATABASE_URL is required for the chat proxy test")
     monkeypatch.setenv("MASTER_ENCRYPTION_KEY", base64.b64encode(b"a" * 32).decode())
     monkeypatch.setenv("OPENAI_BASE_URL", "http://mock-provider:8002")
+    monkeypatch.setenv("DEFAULT_MAX_OUTPUT_TOKENS", "16")
     engine = create_async_engine(url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with engine.begin() as conn:
@@ -50,6 +53,23 @@ async def test_chat_proxy_preserves_body_and_uses_provider_credential(
                 nonce=nonce,
             )
         )
+        session.add(
+            Budget(
+                workflow_id=workflow.id, period=datetime.now(UTC).strftime("%Y-%m"), cap_micro=50
+            )
+        )
+        session.add(
+            Price(
+                provider="openai",
+                model="gpt-mock",
+                effective_from=date(2020, 1, 1),
+                input=1_000_000,
+                output=1_000_000,
+                cache_read=1_000_000,
+                cache_write=1_000_000,
+                reasoning=1_000_000,
+            )
+        )
         await session.commit()
 
     async def test_session():  # type: ignore[no-untyped-def]
@@ -74,11 +94,22 @@ async def test_chat_proxy_preserves_body_and_uses_provider_credential(
                     content=request_bytes,
                     headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
                 )
+                denied = await http.post(
+                    "/v1/chat/completions",
+                    content=request_bytes,
+                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                )
             assert route.called
             assert route.calls[0].request.content == request_bytes
             assert route.calls[0].request.headers["Authorization"] == "Bearer real-provider-key"
             assert response.status_code == 200
             assert response.content == response_bytes
+            assert denied.status_code == 429
+            assert denied.json()["error"]["code"] == "budget_exceeded"
+            async with factory() as session:
+                budget = (await session.execute(select(Budget))).scalar_one()
+                assert budget.spent_micro == 15
+                assert budget.reserved_micro == 0
             usage = chat_usage(json.loads(response_bytes))
             assert usage is not None
             assert (usage.input, usage.output) == (12, 3)
