@@ -14,6 +14,7 @@ from core.database import get_session
 from core.models import Price, ProviderCredential
 from core.security import decrypt_provider_key
 from gateway.adapters.openai import chat_usage
+from gateway.anthropic import router as anthropic_router
 from gateway.auth import AuthContext, authenticate_openai
 from gateway.errors import GatewayError, openai_error_handler
 from gateway.streaming import stream_openai_chat
@@ -22,6 +23,7 @@ from policy.kill import check_kill
 
 app = FastAPI(title="Governed Automation Gateway")
 app.add_exception_handler(GatewayError, openai_error_handler)
+app.include_router(anthropic_router)
 
 
 @app.get("/health")

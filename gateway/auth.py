@@ -27,7 +27,19 @@ async def authenticate_openai(
 ) -> AuthContext:
     if not authorization or not authorization.startswith("Bearer "):
         raise GatewayError(401, "invalid_api_key", "A valid virtual key is required")
-    key = authorization[7:]
+    return await resolve_virtual_key(session, authorization[7:])
+
+
+async def authenticate_anthropic(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    x_api_key: Annotated[str | None, Header()] = None,
+) -> AuthContext:
+    if not x_api_key:
+        raise GatewayError(401, "invalid_api_key", "A valid virtual key is required")
+    return await resolve_virtual_key(session, x_api_key)
+
+
+async def resolve_virtual_key(session: AsyncSession, key: str) -> AuthContext:
     if not key.startswith("gk_"):
         raise GatewayError(401, "invalid_api_key", "A valid virtual key is required")
     row = (

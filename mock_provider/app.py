@@ -1,3 +1,4 @@
+import json
 from collections.abc import AsyncIterator
 
 from fastapi import FastAPI, Request
@@ -36,3 +37,61 @@ async def chat_completions(request: Request) -> Response:
         ),
         media_type="application/json",
     )
+
+
+@app.post("/v1/messages")
+async def anthropic_messages(request: Request) -> Response:
+    body = await request.json()
+    message = {
+        "id": "msg_mock",
+        "type": "message",
+        "role": "assistant",
+        "model": body["model"],
+        "content": [{"type": "text", "text": "mock reply"}],
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": {"input_tokens": 12, "output_tokens": 3},
+    }
+    if body.get("stream"):
+
+        async def chunks() -> AsyncIterator[bytes]:
+            start = {
+                **message,
+                "content": [],
+                "stop_reason": None,
+                "usage": {"input_tokens": 12, "output_tokens": 1},
+            }
+            events = [
+                ("message_start", {"type": "message_start", "message": start}),
+                (
+                    "content_block_start",
+                    {
+                        "type": "content_block_start",
+                        "index": 0,
+                        "content_block": {"type": "text", "text": ""},
+                    },
+                ),
+                (
+                    "content_block_delta",
+                    {
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": {"type": "text_delta", "text": "mock reply"},
+                    },
+                ),
+                ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                (
+                    "message_delta",
+                    {
+                        "type": "message_delta",
+                        "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                        "usage": {"output_tokens": 3},
+                    },
+                ),
+                ("message_stop", {"type": "message_stop"}),
+            ]
+            for name, data in events:
+                yield f"event: {name}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n".encode()
+
+        return StreamingResponse(chunks(), media_type="text/event-stream")
+    return Response(json.dumps(message, separators=(",", ":")), media_type="application/json")

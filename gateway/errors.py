@@ -9,8 +9,21 @@ class GatewayError(Exception):
         self.message = message
 
 
-async def openai_error_handler(_request: Request, exc: Exception) -> JSONResponse:
+async def openai_error_handler(request: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, GatewayError)
+    if request.url.path == "/v1/messages":
+        if exc.status_code == 401:
+            error_type = "authentication_error"
+        elif exc.status_code == 429:
+            error_type = "rate_limit_error"
+        elif exc.status_code >= 500:
+            error_type = "api_error"
+        else:
+            error_type = "invalid_request_error"
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"type": "error", "error": {"type": error_type, "message": exc.message}},
+        )
     return JSONResponse(
         status_code=exc.status_code,
         content={
