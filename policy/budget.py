@@ -6,6 +6,7 @@ from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from audit.chain import AuditEventInput, append_event
 from core.models import Budget, Price, Reservation, Run
 from core.usage import Usage
 
@@ -117,7 +118,12 @@ async def reserve(
     return HeldReservation(record.id, budget_id, run_id, est_micro)
 
 
-async def settle(session: AsyncSession, held: HeldReservation, actual_micro: int) -> bool:
+async def settle(
+    session: AsyncSession,
+    held: HeldReservation,
+    actual_micro: int,
+    audit: AuditEventInput | None = None,
+) -> bool:
     record = (
         await session.execute(
             select(Reservation).where(Reservation.id == held.id).with_for_update()
@@ -145,11 +151,27 @@ async def settle(session: AsyncSession, held: HeldReservation, actual_micro: int
     record.status = "settled"
     record.actual_micro = actual_micro
     record.settled_at = datetime.now(UTC)
+    if audit is not None:
+        await append_event(session, audit, record.run_id)
+        if actual_micro > record.est_micro:
+            await append_event(
+                session,
+                AuditEventInput(
+                    client_id=audit.client_id,
+                    type="budget_overrun",
+                    provider=audit.provider,
+                    model=audit.model,
+                    cost_micro=actual_micro - record.est_micro,
+                ),
+                record.run_id,
+            )
     await session.commit()
     return True
 
 
-async def release(session: AsyncSession, held: HeldReservation) -> bool:
+async def release(
+    session: AsyncSession, held: HeldReservation, audit: AuditEventInput | None = None
+) -> bool:
     record = (
         await session.execute(
             select(Reservation).where(Reservation.id == held.id).with_for_update()
@@ -170,5 +192,7 @@ async def release(session: AsyncSession, held: HeldReservation) -> bool:
     )
     record.status = "released"
     record.settled_at = datetime.now(UTC)
+    if audit is not None:
+        await append_event(session, audit, record.run_id)
     await session.commit()
     return True

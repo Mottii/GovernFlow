@@ -9,8 +9,9 @@ import respx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from audit.chain import verify_chain
 from core.database import get_session
-from core.models import Base, Budget, Client, Price, ProviderCredential, VirtualKey, Workflow
+from core.models import Base, Budget, Client, Event, Price, ProviderCredential, VirtualKey, Workflow
 from core.security import encrypt_provider_key, virtual_key_hash
 from gateway.adapters.openai import chat_usage
 from gateway.app import app
@@ -110,6 +111,10 @@ async def test_chat_proxy_preserves_body_and_uses_provider_credential(
                 budget = (await session.execute(select(Budget))).scalar_one()
                 assert budget.spent_micro == 15
                 assert budget.reserved_micro == 0
+                event = (await session.execute(select(Event))).scalar_one()
+                assert event.type == "provider_call"
+                assert event.cost_micro == 15
+                assert await verify_chain(session, client.id) == (True, None)
             usage = chat_usage(json.loads(response_bytes))
             assert usage is not None
             assert (usage.input, usage.output) == (12, 3)

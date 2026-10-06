@@ -8,6 +8,7 @@ from fastapi import Depends, FastAPI, Request, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from audit.chain import AuditEventInput
 from core.database import get_session
 from core.models import ProviderCredential
 from core.security import decrypt_provider_key
@@ -91,6 +92,7 @@ async def chat_completions(
     if held is None:
         raise GatewayError(429, "budget_exceeded", "Workflow budget exceeded")
     completed = False
+    failure_type = "provider_error"
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             upstream = await client.post(
@@ -111,16 +113,41 @@ async def chat_completions(
             except ValueError:
                 pass
             actual = cost_micro(usage, price) if usage is not None else held.est_micro
-            completed = await settle(session, held, actual)
+            completed = await settle(
+                session,
+                held,
+                actual,
+                AuditEventInput(
+                    client_id=auth.client_id,
+                    type="provider_call",
+                    provider="openai",
+                    model=model,
+                    usage=usage.raw if usage is not None else None,
+                    cost_micro=actual,
+                    estimated=usage is None,
+                ),
+            )
             if not completed:
                 raise GatewayError(500, "settlement_failed", "Could not settle reservation")
+        else:
+            failure_type = "provider_rejected"
     except httpx.TimeoutException as exc:
         raise GatewayError(504, "upstream_timeout", "Upstream provider timed out") from exc
     except httpx.RequestError as exc:
         raise GatewayError(502, "upstream_unavailable", "Upstream provider is unavailable") from exc
     finally:
         if not completed:
-            await release(session, held)
+            await release(
+                session,
+                held,
+                AuditEventInput(
+                    client_id=auth.client_id,
+                    type=failure_type,
+                    provider="openai",
+                    model=model,
+                    cost_micro=0,
+                ),
+            )
     response_headers: dict[str, str] = {}
     for header in ("content-type", "x-request-id", "retry-after"):
         if header in upstream.headers:
