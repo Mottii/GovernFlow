@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Monthly report · $period</title>
+<style>
+@page { size: A4; margin: 18mm; }
+* { box-sizing: border-box; }
+body { font: 14px/1.6 system-ui,sans-serif; color: #1c3026;
+  margin: 40px auto; max-width: 950px; padding: 0 20px; }
+header { border-bottom: 2px solid #327553; padding-bottom: 20px; }
+h1 { font-size: 30px; margin: 8px 0; } h2 { font-size: 18px; }
+.meta { color: #68776b; font-size: 12px; }
+.stats { display: flex; gap: 35px; padding: 24px 0; }
+.stats strong { display: block; font-size: 24px; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th,td { padding: 12px 8px; border-bottom: 1px solid #dfe6de;
+  text-align: left; overflow-wrap: anywhere; }
+th { background: #f2f6ef; } tfoot { font-weight: 700; }
+section { margin-top: 28px; } tr { break-inside: avoid; }
+.note { white-space: pre-wrap; }
+footer { margin-top: 35px; border-top: 1px solid #dfe6de; padding-top: 12px; }
+@media print { body { margin: 0; padding: 0; } }
+</style>
+</head>
+<body>
+<header><span class="meta">GOVERNED AUTOMATION · MONTHLY REPORT</span>
+<h1>$client_name</h1><span class="meta">$period · UTC · USD</span></header>
+<div class="stats">
+<div>Total gateway cost<strong>$$$total_cost</strong></div>
+<div>Provider calls<strong>$calls</strong></div>
+<div>Hours saved<strong>$saved_text</strong></div>
+</div>
+<h2>Spend by workflow</h2>
+<table><thead><tr><th>Workflow</th><th>Risk</th><th>Calls</th>
+<th>Estimated</th><th>Cost (USD)</th></tr></thead>
+<tbody>$rows</tbody>
+<tfoot><tr><td>Total</td><td></td><td>$calls</td><td>$estimated_calls</td>
+<td>$$$total_cost</td></tr></tfoot></table>
+<section><h2>Savings evidence</h2><p>$saved_text.
+Hours saved are supplied by a human and are not inferred from provider-call counts.</p>
+<p class="note">$savings_note</p></section>
+<section><h2>Provider reconciliation</h2><p>$reporting $flags open drift flags.
+Positive unexplained drift is labeled possible bypass; estimates and reporting delays require review.
+Gemini is gateway-observed in v1.</p></section>
+<section class="meta">Cost totals equal provider-call audit events settled in this UTC month.
+$estimated_calls calls have estimated charges. Monthly budget spend ($$$budget_spent)
+follows reservation periods and can differ across month boundaries. Reserved: $$$reserved.</section>
+<footer class="meta">Generated $generated_at · Governed Automation Starter</footer>
+</body></html>

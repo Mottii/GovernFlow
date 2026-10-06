@@ -1104,3 +1104,50 @@ pre {
     display: grid;
   }
 }
+
+.export-link {
+  text-decoration: none;
+}
+.report-stats {
+  display: flex;
+  gap: 50px;
+  padding: 0 23px 25px;
+}
+.report-stats span {
+  font-size: 11px;
+  color: var(--muted);
+  display: block;
+}
+.report-stats strong {
+  display: block;
+  font-size: 25px;
+  font-weight: 550;
+  margin-top: 10px;
+}
+textarea {
+  width: 100%;
+  min-height: 95px;
+  resize: vertical;
+  display: block;
+  margin-top: 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 12px;
+  font: inherit;
+  color: var(--ink);
+}
+textarea:focus {
+  outline: 2px solid var(--green);
+}
+@media (max-width: 760px) {
+  .report-stats {
+    gap: 20px;
+    flex-wrap: wrap;
+  }
+  .report-stats strong {
+    font-size: 21px;
+  }
+  .panel-head:has(.export-link) {
+    flex-wrap: wrap;
+  }
+}

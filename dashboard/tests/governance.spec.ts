@@ -66,6 +66,33 @@ test("create key, call native gateway, view spend, and kill workflow", async ({
   await expect(
     page.getByText("No reporting jobs yet", { exact: true }),
   ).toBeVisible();
+  await page.getByRole("button", { name: "Reports", exact: true }).click();
+  await page.getByLabel("Minutes saved", { exact: true }).fill("123");
+  await page
+    .getByLabel("Evidence note", { exact: true })
+    .fill("Estimated from two hours of baseline work and three minutes saved.");
+  await page.getByRole("button", { name: "Save savings", exact: true }).click();
+  await expect(
+    page.getByText("Savings evidence saved.", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("2.05", { exact: true })).toBeVisible();
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    page.getByRole("link", { name: "Export CSV", exact: true }).click(),
+  ]);
+  await download.saveAs("test-results/monthly-report.csv");
+  const [printable] = await Promise.all([
+    page.waitForEvent("popup"),
+    page.getByRole("link", { name: "Printable HTML", exact: true }).click(),
+  ]);
+  await expect(
+    printable.getByText("2.050000 hours (estimate)", { exact: true }),
+  ).toBeVisible();
+  await printable.screenshot({
+    path: "test-results/monthly-report.png",
+    fullPage: true,
+  });
+  await printable.close();
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole("button", { name: "Overview", exact: true }).click();
   await expect(page.getByTestId("monthly-spend")).toBeVisible();

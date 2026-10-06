@@ -385,3 +385,20 @@ class LoginBucket(Base):
     identity: Mapped[str] = mapped_column(Text, primary_key=True)
     minute: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
     count: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class MonthlyMetric(Base):
+    __tablename__ = "monthly_metrics"
+    __table_args__ = (
+        CheckConstraint("minutes_saved >= 0"),
+        CheckConstraint("basis IN ('measured','estimate')"),
+    )
+    client_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("clients.id"), primary_key=True
+    )
+    period: Mapped[str] = mapped_column(Text, primary_key=True)
+    minutes_saved: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    basis: Mapped[str] = mapped_column(Text, nullable=False)
+    note: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    updated_by: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

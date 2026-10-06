@@ -42,6 +42,13 @@ async function proxy(
           "Content-Type":
             upstream.headers.get("content-type") || "application/json",
           "Cache-Control": "no-store",
+          ...(upstream.headers.get("content-security-policy")
+            ? {
+                "Content-Security-Policy": upstream.headers.get(
+                  "content-security-policy",
+                )!,
+              }
+            : {}),
           ...(upstream.headers.get("content-disposition")
             ? {
                 "Content-Disposition": upstream.headers.get(

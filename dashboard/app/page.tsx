@@ -9,6 +9,7 @@ import {
   ClipboardCheck,
   Copy,
   KeyRound,
+  FileDown,
   LayoutDashboard,
   LogOut,
   Pause,
@@ -104,6 +105,29 @@ type Reconciliation = {
     dimension: string;
     gateway: Record<string, number>;
     observed: Record<string, number>;
+  }[];
+};
+type MonthlyReport = {
+  period: string;
+  client: { id: string; name: string };
+  totals: {
+    cost_micro: number;
+    calls: number;
+    estimated_calls: number;
+    reserved_micro: number;
+  };
+  hours_saved: {
+    minutes: number;
+    hours: string;
+    basis: string;
+    note: string;
+  } | null;
+  workflows: {
+    id: string | null;
+    name: string;
+    cost_micro: number;
+    calls: number;
+    estimated_calls: number;
   }[];
 };
 const money = (micro: number) =>
@@ -202,6 +226,26 @@ export default function Dashboard() {
     "workflow" | "user" | "credential" | "mapping" | "client" | null
   >(null);
   const [notice, setNotice] = useState("");
+  const [report, setReport] = useState<MonthlyReport | null>(null);
+  const reportClient = client || clients[0]?.id;
+  useEffect(() => {
+    if (tab !== "Reports" || !reportClient) return;
+    let current = true;
+    setReport(null);
+    api<MonthlyReport>(`reports/${reportClient}/${period}`)
+      .then((value) => {
+        if (current) setReport(value);
+      })
+      .catch((error) => {
+        if (current)
+          setError(
+            error instanceof Error ? error.message : "Report unavailable",
+          );
+      });
+    return () => {
+      current = false;
+    };
+  }, [tab, reportClient, period]);
   const load = useCallback(async () => {
     try {
       const [m, c, w, s, a, al, k, vk, r] = await Promise.all([
@@ -353,6 +397,7 @@ export default function Dashboard() {
     { name: "Approvals", icon: ClipboardCheck },
     { name: "Alerts", icon: TriangleAlert },
     { name: "Reconciliation", icon: Activity },
+    { name: "Reports", icon: FileDown },
     { name: "Settings", icon: SlidersHorizontal },
   ];
   const workflowTable = (
@@ -1054,6 +1099,191 @@ export default function Dashboard() {
                       </table>
                     </div>
                   </section>
+                </>
+              )}
+              {tab === "Reports" && (
+                <>
+                  {!reportClient ? (
+                    <section className="panel empty">
+                      <FileDown />
+                      <h3>No clients yet</h3>
+                      <p>Add a client to create monthly reports.</p>
+                    </section>
+                  ) : !report ? (
+                    <div className="empty">Loading report…</div>
+                  ) : (
+                    <>
+                      <section className="panel">
+                        <div className="panel-head">
+                          <div>
+                            <h2>
+                              {report.client.name} · {report.period}
+                            </h2>
+                            <p>Monthly costs and savings, ready to share.</p>
+                          </div>
+                          <div className="controls">
+                            <a
+                              className="small export-link"
+                              href={`/api/admin/reports/${reportClient}/${period}?format=csv`}
+                            >
+                              <FileDown size={15} />
+                              Export CSV
+                            </a>
+                            <a
+                              className="small export-link"
+                              href={`/api/admin/reports/${reportClient}/${period}?format=html`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
+                              Printable HTML
+                              <ArrowUpRight size={15} />
+                            </a>
+                          </div>
+                        </div>
+                        <div className="report-stats">
+                          <div>
+                            <span>Total gateway cost</span>
+                            <strong>{money(report.totals.cost_micro)}</strong>
+                          </div>
+                          <div>
+                            <span>Provider calls</span>
+                            <strong>{report.totals.calls}</strong>
+                          </div>
+                          <div>
+                            <span>Hours saved</span>
+                            <strong>
+                              {report.hours_saved
+                                ? Number(
+                                    report.hours_saved.hours,
+                                  ).toLocaleString(undefined, {
+                                    maximumFractionDigits: 2,
+                                  })
+                                : "Not supplied"}
+                            </strong>
+                            <span>{report.hours_saved?.basis}</span>
+                          </div>
+                        </div>
+                        <div className="table-wrap">
+                          <table>
+                            <thead>
+                              <tr>
+                                <th>Workflow</th>
+                                <th>Calls</th>
+                                <th>Estimated calls</th>
+                                <th>Cost (USD)</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {report.workflows.map((w) => (
+                                <tr key={w.id || "unassigned"}>
+                                  <td>{w.name}</td>
+                                  <td>{w.calls}</td>
+                                  <td>{w.estimated_calls}</td>
+                                  <td className="numeric">
+                                    {money(w.cost_micro)}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                        <div className="panel-foot">
+                          Totals follow charges settled in this UTC month.{" "}
+                          {report.totals.estimated_calls} calls have estimated
+                          charges.
+                        </div>
+                      </section>
+                      <section className="panel space-top">
+                        <div className="panel-head">
+                          <div>
+                            <h2>Savings evidence</h2>
+                            <p>
+                              Supply saved time in minutes; exports convert it
+                              to hours.
+                            </p>
+                          </div>
+                          <ClipboardCheck size={18} />
+                        </div>
+                        <div className="settings-body">
+                          {operate ? (
+                            <form
+                              key={reportClient + period}
+                              onSubmit={(event) => {
+                                event.preventDefault();
+                                const fields = new FormData(
+                                  event.currentTarget,
+                                );
+                                void mutate(async () => {
+                                  await api(
+                                    `reports/${reportClient}/${period}/hours`,
+                                    {
+                                      minutes_saved: Number(
+                                        fields.get("minutes_saved"),
+                                      ),
+                                      basis: fields.get("basis"),
+                                      note: fields.get("note"),
+                                    },
+                                  );
+                                  setReport(
+                                    await api<MonthlyReport>(
+                                      `reports/${reportClient}/${period}`,
+                                    ),
+                                  );
+                                  setNotice("Savings evidence saved.");
+                                });
+                              }}
+                            >
+                              <div className="form-row">
+                                <label>
+                                  Minutes saved
+                                  <input
+                                    name="minutes_saved"
+                                    type="number"
+                                    min="0"
+                                    step="1"
+                                    required
+                                    defaultValue={
+                                      report.hours_saved?.minutes || 0
+                                    }
+                                  />
+                                </label>
+                                <label>
+                                  Evidence basis
+                                  <select
+                                    name="basis"
+                                    defaultValue={
+                                      report.hours_saved?.basis || "estimate"
+                                    }
+                                  >
+                                    <option value="estimate">Estimate</option>
+                                    <option value="measured">Measured</option>
+                                  </select>
+                                </label>
+                              </div>
+                              <label>
+                                Evidence note
+                                <textarea
+                                  name="note"
+                                  maxLength={2000}
+                                  defaultValue={report.hours_saved?.note || ""}
+                                  placeholder="Baseline work time, time measured, and how this figure was calculated"
+                                />
+                              </label>
+                              <button className="primary small" disabled={busy}>
+                                <Check size={16} />
+                                Save savings
+                              </button>
+                            </form>
+                          ) : (
+                            <p>
+                              {report.hours_saved?.note ||
+                                "No savings evidence supplied."}
+                            </p>
+                          )}
+                        </div>
+                      </section>
+                    </>
+                  )}
                 </>
               )}
               {tab === "Settings" && (

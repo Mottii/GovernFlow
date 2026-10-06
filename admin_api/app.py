@@ -11,6 +11,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from admin_api.auth import Actor, DbSession, client_scope, permit, workflow_scope
 from admin_api.dashboard import router as dashboard_router
+from admin_api.reports import router as reports_router
 from admin_api.users import router as users_router
 from approvals.human import router as human_router
 from approvals.service import Decision, decide
@@ -33,6 +34,7 @@ app.add_exception_handler(GatewayError, openai_error_handler)
 app.include_router(human_router)
 app.include_router(users_router)
 app.include_router(dashboard_router)
+app.include_router(reports_router)
 
 
 @app.middleware("http")

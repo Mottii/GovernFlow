@@ -77,3 +77,9 @@ A mock provider call absent from the gateway triggered `possible_bypass` in one 
 ## T4.4 — 2026-10-06
 
 All 50 backend tests passed against Postgres 16, including role restrictions and foreign-client IDs on every admin read and mutation. Ruff and mypy passed. TypeScript and the Next.js production build passed. Two Playwright tests passed against the Compose backend: create key, native call, visible spend, workflow pause and gateway 503 within the propagation limit, mobile controls and sign out, and rejection of foreign-origin mutations. Desktop and mobile screenshots were visually reviewed. Live provider calls remain pending credentials.
+
+## Phase 4 / T4.5 — 2026-10-06
+
+All 51 backend tests passed against Postgres 16. Monthly-report tests checked exact database/CSV/HTML cost totals, measured versus estimated savings, evidence updates, escaping, and tenant and role restrictions on every format. Ruff, backend/SDK mypy, TypeScript, and the Next.js production build passed. Two Playwright tests passed against the complete containerized stack, including saving savings evidence, downloading CSV, opening printable HTML, workflow pause, mobile sign out, and cross-origin rejection. The printable monthly report was visually reviewed. All Compose images built and services started; the database is at migration 0014 and the six-model catalog is seeded.
+
+Phases 1–4 are implemented with one commit per section 18 task. Live Telegram, SMTP/webhook delivery, provider captures, and OpenAI/Anthropic reconciliation remain pending suitable credentials and external endpoints; deterministic mock and SDK contracts passed. The user does not currently have Telegram or provider reporting credentials. Acquisition steps are documented in `docs/live-setup.md`. Phase 5's live client pilot is outside this delivery.
