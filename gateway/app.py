@@ -6,7 +6,7 @@ from typing import Annotated, Any
 import httpx
 from fastapi import Depends, FastAPI, Request, Response
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from audit.chain import AuditEventInput
 from core.database import get_session
@@ -15,6 +15,7 @@ from core.security import decrypt_provider_key
 from gateway.adapters.openai import chat_usage
 from gateway.auth import AuthContext, authenticate_openai
 from gateway.errors import GatewayError, openai_error_handler
+from gateway.streaming import stream_openai_chat
 from policy.budget import cost_micro, current_price, estimate_micro, release, reserve, settle
 from policy.kill import check_kill
 
@@ -41,9 +42,12 @@ async def chat_completions(
         raise GatewayError(400, "invalid_json", "Request body must be JSON") from exc
     if not isinstance(parsed, dict) or not isinstance(parsed.get("model"), str):
         raise GatewayError(400, "invalid_request", "A model is required")
-    if parsed.get("stream"):
-        raise GatewayError(501, "stream_not_available", "Streaming is not implemented yet")
-
+    if (
+        parsed.get("stream")
+        and parsed.get("stream_options") is not None
+        and not isinstance(parsed["stream_options"], dict)
+    ):
+        raise GatewayError(400, "invalid_stream_options", "stream_options must be an object")
     model = parsed["model"]
     price = await current_price(session, "openai", model)
     if price is None:
@@ -93,6 +97,20 @@ async def chat_completions(
     )
     if held is None:
         raise GatewayError(429, "budget_exceeded", "Workflow budget exceeded")
+    if parsed.get("stream"):
+        assert isinstance(session.bind, AsyncEngine)
+        return await stream_openai_chat(
+            body=body,
+            parsed=parsed,
+            client_id=auth.client_id,
+            model=model,
+            provider_key=provider_key,
+            upstream_url=f"{base_url}/v1/chat/completions",
+            timeout=timeout,
+            price=price,
+            held=held,
+            db_engine=session.bind,
+        )
     completed = False
     failure_type = "provider_error"
     try:

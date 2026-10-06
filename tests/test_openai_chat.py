@@ -94,10 +94,25 @@ async def test_chat_proxy_preserves_body_and_uses_provider_credential(
     response_bytes = (
         b'{"id":"chatcmpl_mock","usage":{"prompt_tokens":12,"completion_tokens":3},"choices":[]}'
     )
+    stream_head = b'data: {"choices":[{"delta":{"content":"hello"}}],"usage":null}\n\n'
+    stream_usage = b'data: {"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2}}\n\n'
+    stream_done = b"data: [DONE]\n\n"
+
+    def provider_reply(request: httpx.Request) -> httpx.Response:
+        upstream_body = json.loads(request.content)
+        if upstream_body.get("stream"):
+            chunks = stream_head + stream_done
+            if upstream_body["messages"][0]["content"] != "cut":
+                chunks = stream_head + stream_usage + stream_done
+            return httpx.Response(
+                200, content=chunks, headers={"content-type": "text/event-stream"}
+            )
+        return httpx.Response(200, content=response_bytes)
+
     try:
         with respx.mock(assert_all_called=True) as mock:
             route = mock.post("http://mock-provider:8002/v1/chat/completions").mock(
-                return_value=httpx.Response(200, content=response_bytes)
+                side_effect=provider_reply
             )
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://gateway.test"
@@ -149,6 +164,28 @@ async def test_chat_proxy_preserves_body_and_uses_provider_credential(
                     content=request_bytes,
                     headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
                 )
+                async with factory() as session:
+                    budget = (await session.execute(select(Budget))).scalar_one()
+                    budget.cap_micro = 1000
+                    await session.commit()
+                stream_body = (
+                    b'{"model":"gpt-mock","stream":true,'
+                    b'"messages":[{"role":"user","content":"hello"}]}'
+                )
+                streamed = await http.post(
+                    "/v1/chat/completions",
+                    content=stream_body,
+                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                )
+                cut_body = (
+                    b'{"model":"gpt-mock","stream":true,'
+                    b'"messages":[{"role":"user","content":"cut"}]}'
+                )
+                cut = await http.post(
+                    "/v1/chat/completions",
+                    content=cut_body,
+                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                )
             assert route.called
             assert killed.status_code == 503
             assert killed.json()["error"]["code"] == "workflow_killed"
@@ -158,13 +195,23 @@ async def test_chat_proxy_preserves_body_and_uses_provider_credential(
             assert response.content == response_bytes
             assert denied.status_code == 429
             assert denied.json()["error"]["code"] == "budget_exceeded"
+            assert streamed.status_code == 200
+            assert streamed.content == stream_head + stream_done
+            assert json.loads(route.calls[1].request.content)["stream_options"] == {
+                "include_usage": True
+            }
+            assert cut.status_code == 200
+            assert cut.content == stream_head + stream_done
             async with factory() as session:
                 budget = (await session.execute(select(Budget))).scalar_one()
-                assert budget.spent_micro == 15
+                assert budget.spent_micro > 22
                 assert budget.reserved_micro == 0
-                event = (await session.execute(select(Event))).scalar_one()
-                assert event.type == "provider_call"
-                assert event.cost_micro == 15
+                events = (await session.execute(select(Event).order_by(Event.id))).scalars().all()
+                assert len(events) == 3
+                assert events[0].cost_micro == 15
+                assert events[1].cost_micro == 7
+                assert events[1].estimated is False
+                assert events[2].estimated is True
                 assert await verify_chain(session, client.id) == (True, None)
             usage = chat_usage(json.loads(response_bytes))
             assert usage is not None
