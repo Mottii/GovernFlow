@@ -34,6 +34,12 @@ event.listen(
 )
 
 
+@pytest.fixture(autouse=True)
+def metadata_database_auth(monkeypatch):
+    # create_all intentionally omits Alembic's SECURITY DEFINER auth functions.
+    monkeypatch.setenv("ENFORCE_AGENCY_RLS", "false")
+
+
 @pytest_asyncio.fixture
 async def governed(monkeypatch: pytest.MonkeyPatch, tmp_path):
     monkeypatch.setenv("REPLAY_QUEUE_PATH", str(tmp_path / "replay.sqlite3"))

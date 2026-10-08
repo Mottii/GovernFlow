@@ -104,6 +104,7 @@ async def forward(request: Request) -> Response | None:
             raise GatewayError(429, "outage_limit", "Replica outage allowance exhausted")
         now = datetime.now(UTC)
         payload: dict[str, Any] = {
+            "agency_id": str(snapshot.auth.agency_id),
             "client_id": str(snapshot.auth.client_id),
             "workflow_id": str(snapshot.auth.workflow_id),
             "provider": snapshot.price.provider,

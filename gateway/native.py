@@ -16,6 +16,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from audit.chain import AuditEventInput
+from core.database import set_agency_context
 from core.models import Budget, ProviderAccount, ProviderCredential, Run
 from core.security import decrypt_provider_key
 from core.usage import Usage
@@ -129,6 +130,8 @@ async def proxy_native(
             run.cap_micro - run.cost_micro - run.reserved_micro,
         ),
     )
+    # Release the read transaction before the provider wait and separate settlement session.
+    await session.commit()
     upstream_body = body
     if stream and isinstance(tracker, ChatStreamTracker):
         parsed = json.loads(body)
@@ -171,6 +174,7 @@ async def proxy_native(
         actual = cost_micro(usage, price) if usage is not None else held.est_micro
         try:
             async with factory() as final_session:
+                await set_agency_context(final_session, auth.agency_id)
                 await settle(
                     final_session,
                     held,
@@ -188,6 +192,7 @@ async def proxy_native(
         except DBAPIError:
             await enqueue(
                 {
+                    "agency_id": str(auth.agency_id),
                     "client_id": str(auth.client_id),
                     "workflow_id": str(auth.workflow_id),
                     "provider": provider,

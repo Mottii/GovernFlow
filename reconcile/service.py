@@ -126,21 +126,20 @@ async def reconcile(session: AsyncSession, account: ProviderAccount, day: date) 
 
 
 async def run(day: date | None = None) -> dict[str, int]:
-    from core.database import session_factory
+    from core.database import agency_sessions
 
-    async with session_factory() as session:
-        keys = (
-            await session.execute(select(ProviderAccount.client_id, ProviderAccount.provider))
-        ).all()
     dates = (
         [day]
         if day
         else [datetime.now(UTC).date() - timedelta(days=offset) for offset in (1, 2, 3)]
     )
     completed = failed = 0
-    for client_id, provider in keys:
-        for target in dates:
-            async with session_factory() as session:
+    async for session in agency_sessions():
+        keys = (
+            await session.execute(select(ProviderAccount.client_id, ProviderAccount.provider))
+        ).all()
+        for client_id, provider in keys:
+            for target in dates:
                 account = await session.get(ProviderAccount, (client_id, provider))
                 if account is None:
                     continue

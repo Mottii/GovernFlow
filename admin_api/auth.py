@@ -7,10 +7,10 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import Depends, Header, HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.database import get_session
+from core.database import agency_rls_enabled, get_session, set_agency_context
 from core.models import (
     DEFAULT_AGENCY_ID,
     AdminSession,
@@ -52,7 +52,18 @@ async def require_admin(
         raise HTTPException(401, "Authentication is required")
     expected = os.environ.get("ADMIN_TOKEN", "")
     if expected and hmac.compare_digest(supplied.encode(), expected.encode()):
+        await set_agency_context(session, DEFAULT_AGENCY_ID)
         return Principal("admin", platform_maintenance=True)
+    if agency_rls_enabled():
+        agency_id = (
+            await session.execute(
+                text("SELECT public.governflow_session_agency(:digest)"),
+                {"digest": token_hash(supplied)},
+            )
+        ).scalar_one_or_none()
+        if agency_id is None:
+            raise HTTPException(401, "Invalid or expired session")
+        await set_agency_context(session, agency_id)
     row = (
         await session.execute(
             select(User, AgencyMembership)
@@ -75,6 +86,7 @@ async def require_admin(
     if row is None:
         raise HTTPException(401, "Invalid or expired session")
     user, membership = row
+    await set_agency_context(session, membership.agency_id)
     grants = (
         None
         if membership.all_clients

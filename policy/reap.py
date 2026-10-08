@@ -7,7 +7,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from audit.chain import AuditEventInput, append_event
-from core.database import session_factory
+from core.database import agency_sessions
 from core.models import Budget, Reservation, Run, Workflow
 
 
@@ -47,12 +47,12 @@ async def reap_stale(session: AsyncSession, before: datetime, limit: int = 100) 
 
 async def main() -> None:
     total = 0
-    while True:
-        async with session_factory() as session:
+    async for session in agency_sessions():
+        while True:
             count = await reap_stale(session, datetime.now(UTC) - timedelta(hours=1))
-        total += count
-        if count < 100:
-            break
+            total += count
+            if count < 100:
+                break
     print(f"Released {total} stale reservations")
 
 

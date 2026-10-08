@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from approvals.expiry import expire_record
 from approvals.signing import sign
 from audit.chain import AuditEventInput, append_event
-from core.models import Approval, Notification, Workflow
+from core.models import DEFAULT_AGENCY_ID, Approval, Notification, Workflow
 from core.security import decrypt_provider_key, encrypt_provider_key
 from gateway.auth import AuthContext
 from gateway.errors import GatewayError
@@ -186,6 +186,8 @@ async def check(session: AsyncSession, auth: AuthContext, body: ActionCheck) -> 
             channel not in ("telegram", "email", "webhook") for channel in channels
         ):
             raise GatewayError(503, "invalid_policy", "Approval notification channels are invalid")
+        if auth.agency_id != DEFAULT_AGENCY_ID:
+            channels = []  # Scoped destinations are required before enabling new agencies.
         await session.flush()
         for channel in set(channels):
             session.add(Notification(approval_id=record.id, channel=channel))

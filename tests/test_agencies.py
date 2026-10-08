@@ -298,6 +298,7 @@ async def test_virtual_key_context_tracks_agency_and_suspension(governed):
         with pytest.raises(GatewayError) as error:
             await resolve_virtual_key(session, governed.b.key)
         assert error.value.status_code == 401
+    async with governed.factory() as session:
         assert (
             await resolve_virtual_key(session, governed.a.key)
         ).client_id == governed.a.client.id

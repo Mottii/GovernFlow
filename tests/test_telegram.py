@@ -49,7 +49,8 @@ async def test_telegram_notification_review_callback_and_replay(governed, monkey
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=admin_app), base_url="http://admin"
     ) as admin:
-        page = await admin.get(link)
+        assert (await admin.get(link)).status_code == 401
+        page = await admin.get(link, headers={"authorization": "Bearer test-admin"})
         assert page.status_code == 200 and "&lt;script&gt;" in page.text
         assert "<script>bad</script>" not in page.text
         update_body = {

@@ -9,6 +9,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
 from admin_api.auth import Actor, DbSession, client_scope, permit, platform_only
+from core.database import set_agency_context
 from core.models import AdminSession, Agency, AgencyMembership, Client, ClientAssignment, User
 
 router = APIRouter()
@@ -132,6 +133,8 @@ async def provision_membership(
     actor: Actor,
 ) -> dict[str, Any]:
     platform_only(actor)
+    await session.commit()
+    await set_agency_context(session, agency_id)
     return await save_membership(session, agency_id, user_id, body)
 
 

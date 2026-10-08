@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from approvals.service import content
 from approvals.signing import b64, secret, sign
-from core.models import Alert, Approval, Notification, Workflow
+from core.models import DEFAULT_AGENCY_ID, Alert, Approval, Client, Notification, Workflow
 from gateway.errors import GatewayError
 
 
@@ -42,7 +42,9 @@ def review_link(record: Approval, channel: str) -> str:
         }
     )
     return (
-        os.environ.get("PUBLIC_ADMIN_URL", "http://localhost:8001").rstrip("/")
+        os.environ.get(
+            "PUBLIC_DASHBOARD_URL", os.environ.get("PUBLIC_ADMIN_URL", "http://localhost:3000")
+        ).rstrip("/")
         + f"/review/{record.id}?token={token}"
     )
 
@@ -113,6 +115,12 @@ async def dispatch(session: AsyncSession) -> int:
                 select(Workflow.client_id).where(Workflow.id == approval.workflow_id)
             )
         ).scalar_one()
+        agency_id = (
+            await session.execute(select(Client.agency_id).where(Client.id == client_id))
+        ).scalar_one()
+        if agency_id != DEFAULT_AGENCY_ID:
+            item.status = "cancelled"
+            continue
         try:
             from approvals.channels import email, webhook
 
@@ -139,9 +147,9 @@ async def dispatch(session: AsyncSession) -> int:
 
 
 async def main() -> None:
-    from core.database import session_factory
+    from core.database import agency_sessions
 
-    async with session_factory() as session:
+    async for session in agency_sessions():
         print(f"Sent {await dispatch(session)} approval notifications")
 
 

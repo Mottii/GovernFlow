@@ -48,9 +48,9 @@ async def expire_pending(session: AsyncSession, approval_id: uuid.UUID | None = 
 
 
 async def main() -> None:
-    from core.database import session_factory
+    from core.database import agency_sessions
 
-    async with session_factory() as session:
+    async for session in agency_sessions():
         print(f"Expired {await expire_pending(session)} approvals")
 
 

@@ -4,15 +4,17 @@ import os
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Literal
 
 from fastapi import APIRouter, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 
 from admin_api.auth import Actor, DbSession, client_scope, password_hash, permit, token_hash
+from core.database import agency_rls_enabled, set_agency_context
 from core.models import AdminSession, Agency, AgencyMembership, ClientAssignment, LoginBucket, User
 
 router = APIRouter()
@@ -195,21 +197,31 @@ async def login(
     )
     if user is None or not user.active or not hmac.compare_digest(digest, user.password_hash):
         raise HTTPException(401, "Invalid email or password")
-    memberships = (
-        (
+    if agency_rls_enabled():
+        rows = (
             await session.execute(
-                select(AgencyMembership)
-                .join(Agency, Agency.id == AgencyMembership.agency_id)
-                .where(
-                    AgencyMembership.user_id == user.id,
-                    AgencyMembership.active.is_(True),
-                    Agency.status == "active",
+                text("SELECT agency_id, role FROM public.governflow_login_agencies(:identity)"),
+                {"identity": user.id},
+            )
+        ).all()
+        memberships = [SimpleNamespace(agency_id=r.agency_id, role=r.role) for r in rows]
+    else:
+        records = (
+            (
+                await session.execute(
+                    select(AgencyMembership)
+                    .join(Agency, Agency.id == AgencyMembership.agency_id)
+                    .where(
+                        AgencyMembership.user_id == user.id,
+                        AgencyMembership.active.is_(True),
+                        Agency.status == "active",
+                    )
                 )
             )
+            .scalars()
+            .all()
         )
-        .scalars()
-        .all()
-    )
+        memberships = [SimpleNamespace(agency_id=r.agency_id, role=r.role) for r in records]
     # A requested agency is a selector only after password and membership verification.
     choices = [m for m in memberships if body.agency_id is None or m.agency_id == body.agency_id]
     if not choices:
@@ -219,6 +231,7 @@ async def login(
             409, {"message": "Choose an agency", "agency_ids": [str(m.agency_id) for m in choices]}
         )
     membership = choices[0]
+    await set_agency_context(session, membership.agency_id)
     token = secrets.token_urlsafe(32)
     session.add(
         AdminSession(

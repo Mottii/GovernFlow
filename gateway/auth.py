@@ -3,10 +3,10 @@ from dataclasses import dataclass
 from typing import Annotated, Any
 
 from fastapi import Depends, Header
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.database import get_session
+from core.database import agency_rls_enabled, get_session, set_agency_context
 from core.models import DEFAULT_AGENCY_ID, Agency, Client, VirtualKey, Workflow
 from core.security import virtual_key_hash
 from gateway.errors import GatewayError
@@ -43,6 +43,16 @@ async def authenticate_anthropic(
 async def resolve_virtual_key(session: AsyncSession, key: str) -> AuthContext:
     if not key.startswith("gk_"):
         raise GatewayError(401, "invalid_api_key", "A valid virtual key is required")
+    if agency_rls_enabled():
+        agency_id = (
+            await session.execute(
+                text("SELECT public.governflow_key_agency(:digest)"),
+                {"digest": virtual_key_hash(key)},
+            )
+        ).scalar_one_or_none()
+        if agency_id is None:
+            raise GatewayError(401, "invalid_api_key", "A valid virtual key is required")
+        await set_agency_context(session, agency_id)
     row = (
         await session.execute(
             select(VirtualKey, Workflow, Client)
@@ -61,6 +71,7 @@ async def resolve_virtual_key(session: AsyncSession, key: str) -> AuthContext:
     if row is None:
         raise GatewayError(401, "invalid_api_key", "A valid virtual key is required")
     record, workflow, client = row
+    await set_agency_context(session, client.agency_id)
     return AuthContext(
         client_id=client.id,
         workflow_id=workflow.id,

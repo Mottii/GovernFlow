@@ -16,6 +16,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -311,6 +312,12 @@ class Alert(Base):
 
 class ReplayReceipt(Base):
     __tablename__ = "replay_receipts"
+    agency_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agencies.id"),
+        nullable=False,
+        server_default=text("NULLIF(current_setting('governflow.agency_id', true), '')::uuid"),
+    )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
 
 
@@ -330,6 +337,12 @@ class Notification(Base):
 
 class WebhookReceipt(Base):
     __tablename__ = "webhook_receipts"
+    agency_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agencies.id"),
+        nullable=False,
+        server_default=text("NULLIF(current_setting('governflow.agency_id', true), '')::uuid"),
+    )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     received_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

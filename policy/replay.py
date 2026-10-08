@@ -14,7 +14,8 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from audit.chain import AuditEventInput, append_event
-from core.models import Budget, ReplayReceipt, Run
+from core.database import set_agency_context
+from core.models import DEFAULT_AGENCY_ID, Budget, ReplayReceipt, Run
 from policy.budget import HeldReservation, settle
 
 
@@ -64,6 +65,10 @@ async def replay(session: AsyncSession) -> int:
             and datetime.now(UTC).timestamp() - payload["queued_at"] < 3600
         ):
             continue
+        agency_id = uuid.UUID(payload.get("agency_id", str(DEFAULT_AGENCY_ID)))
+        if session.info.get("agency_id") != agency_id and session.in_transaction():
+            await session.rollback()
+        await set_agency_context(session, agency_id)
         receipt = (
             await session.execute(
                 insert(ReplayReceipt)

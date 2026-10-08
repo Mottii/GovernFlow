@@ -1,5 +1,7 @@
 # GovernFlow
 
+The agency release is in progress. See the [release brief](docs/agency-release.md) and [implementation status](docs/agency-release-status.md) for current acceptance evidence and remaining gates.
+
 **Budgets, approvals, and audit for AI automation.**
 
 [![CI](https://github.com/Mottii/GovernFlow/actions/workflows/ci.yml/badge.svg)](https://github.com/Mottii/GovernFlow/actions/workflows/ci.yml)
