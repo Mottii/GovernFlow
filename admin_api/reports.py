@@ -286,7 +286,7 @@ async def set_hours(
     client_id: uuid.UUID, period: str, body: Savings, session: DbSession, actor: Actor
 ) -> dict[str, Any]:
     permit(actor, "admin", "operator")
-    client_scope(actor, client_id)
+    await client_scope(session, actor, client_id)
     month_bounds(period)
     if await session.get(Client, client_id) is None:
         raise HTTPException(404, "Client not found")
@@ -323,7 +323,7 @@ async def get_report(
     actor: Actor,
     format: Literal["json", "csv", "html"] = "json",
 ) -> Any:
-    client_scope(actor, client_id)
+    await client_scope(session, actor, client_id)
     report = await monthly(session, client_id, period)
     filename = f"governed-{client_id}-{period}"
     if format == "csv":

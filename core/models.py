@@ -9,6 +9,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     LargeBinary,
@@ -24,8 +25,33 @@ class Base(DeclarativeBase):
     pass
 
 
+DEFAULT_AGENCY_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
+
+
+class Agency(Base):
+    __tablename__ = "agencies"
+    __table_args__ = (CheckConstraint("status IN ('active','suspended')"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="active")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class Client(Base):
     __tablename__ = "clients"
+    __table_args__ = (UniqueConstraint("agency_id", "id"),)
+
+    agency_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agencies.id"),
+        nullable=False,
+        server_default=str(DEFAULT_AGENCY_ID),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
@@ -376,6 +402,12 @@ class AdminSession(Base):
     __tablename__ = "admin_sessions"
     token_hash: Mapped[bytes] = mapped_column(LargeBinary, primary_key=True)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
+    agency_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agencies.id"),
+        nullable=False,
+        server_default=str(DEFAULT_AGENCY_ID),
+    )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -402,3 +434,43 @@ class MonthlyMetric(Base):
     note: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
     updated_by: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AgencyMembership(Base):
+    __tablename__ = "agency_memberships"
+    __table_args__ = (CheckConstraint("role IN ('admin','operator','approver','viewer')"),)
+
+    agency_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agencies.id"), primary_key=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), primary_key=True
+    )
+    role: Mapped[str] = mapped_column(Text, nullable=False)
+    all_clients: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+
+
+class ClientAssignment(Base):
+    __tablename__ = "client_assignments"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["agency_id", "user_id"],
+            ["agency_memberships.agency_id", "agency_memberships.user_id"],
+        ),
+        ForeignKeyConstraint(["agency_id", "client_id"], ["clients.agency_id", "clients.id"]),
+    )
+
+    agency_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    client_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+
+
+class ExternalLoginIdentity(Base):
+    __tablename__ = "external_login_identities"
+
+    issuer: Mapped[str] = mapped_column(Text, primary_key=True)
+    subject: Mapped[str] = mapped_column(Text, primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )

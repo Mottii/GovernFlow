@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database import get_session
-from core.models import Client, VirtualKey, Workflow
+from core.models import DEFAULT_AGENCY_ID, Agency, Client, VirtualKey, Workflow
 from core.security import virtual_key_hash
 from gateway.errors import GatewayError
 
@@ -19,6 +19,7 @@ class AuthContext:
     risk_class: str
     policy: dict[str, Any]
     key_prefix: str
+    agency_id: uuid.UUID = DEFAULT_AGENCY_ID
 
 
 async def authenticate_openai(
@@ -47,11 +48,13 @@ async def resolve_virtual_key(session: AsyncSession, key: str) -> AuthContext:
             select(VirtualKey, Workflow, Client)
             .join(Workflow, VirtualKey.workflow_id == Workflow.id)
             .join(Client, Workflow.client_id == Client.id)
+            .join(Agency, Agency.id == Client.agency_id)
             .where(
                 VirtualKey.key_hash == virtual_key_hash(key),
                 VirtualKey.revoked_at.is_(None),
                 Workflow.status == "active",
                 Client.status == "active",
+                Agency.status == "active",
             )
         )
     ).one_or_none()
@@ -64,4 +67,5 @@ async def resolve_virtual_key(session: AsyncSession, key: str) -> AuthContext:
         risk_class=workflow.risk_class,
         policy=workflow.policy,
         key_prefix=record.prefix,
+        agency_id=client.agency_id,
     )

@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import func, select
 
-from admin_api.auth import Actor, DbSession, client_scope, permit, workflow_scope
+from admin_api.auth import Actor, DbSession, client_scope, permit, permitted_clients, workflow_scope
 from approvals.service import content
 from core.models import (
     Alert,
@@ -26,9 +26,7 @@ router = APIRouter()
 
 @router.get("/admin/clients")
 async def clients(session: DbSession, actor: Actor) -> list[dict[str, Any]]:
-    query = select(Client).order_by(Client.name)
-    if actor.client_id:
-        query = query.where(Client.id == actor.client_id)
+    query = select(Client).where(Client.id.in_(permitted_clients(actor))).order_by(Client.name)
     rows = (await session.execute(query)).scalars().all()
     return [{"id": str(r.id), "name": r.name, "status": r.status} for r in rows]
 
@@ -37,10 +35,14 @@ async def clients(session: DbSession, actor: Actor) -> list[dict[str, Any]]:
 async def workflows(
     session: DbSession, actor: Actor, client_id: uuid.UUID | None = None
 ) -> list[dict[str, Any]]:
-    query = select(Workflow).order_by(Workflow.name)
-    scope = client_id or actor.client_id
+    query = (
+        select(Workflow)
+        .where(Workflow.client_id.in_(permitted_clients(actor)))
+        .order_by(Workflow.name)
+    )
+    scope = client_id
     if scope:
-        client_scope(actor, scope)
+        await client_scope(session, actor, scope)
         query = query.where(Workflow.client_id == scope)
     rows = (await session.execute(query)).scalars().all()
     return [
@@ -64,13 +66,14 @@ async def spend(
     client_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     period = period or datetime.now(UTC).strftime("%Y-%m")
-    scope = client_id or actor.client_id
+    scope = client_id
     if scope:
-        client_scope(actor, scope)
+        await client_scope(session, actor, scope)
     query = (
         select(Workflow, Client, Budget)
         .join(Client, Client.id == Workflow.client_id)
         .outerjoin(Budget, (Budget.workflow_id == Workflow.id) & (Budget.period == period))
+        .where(Client.id.in_(permitted_clients(actor)))
         .order_by(Client.name, Workflow.name)
     )
     if scope:
@@ -112,7 +115,12 @@ async def spend(
         daily_date,
         func.coalesce(func.sum(Event.cost_micro), 0),
         func.count(),
-    ).where(Event.type == "provider_call", Event.ts >= start, Event.ts < end)
+    ).where(
+        Event.type == "provider_call",
+        Event.ts >= start,
+        Event.ts < end,
+        Event.client_id.in_(permitted_clients(actor)),
+    )
     if scope:
         daily_query = daily_query.where(Event.client_id == scope)
     daily = (await session.execute(daily_query.group_by(daily_date).order_by(daily_date))).all()
@@ -131,8 +139,7 @@ async def keys(
     session: DbSession, actor: Actor, workflow_id: uuid.UUID | None = None
 ) -> list[dict[str, Any]]:
     query = select(VirtualKey).join(Workflow, Workflow.id == VirtualKey.workflow_id)
-    if actor.client_id:
-        query = query.where(Workflow.client_id == actor.client_id)
+    query = query.where(Workflow.client_id.in_(permitted_clients(actor)))
     if workflow_id:
         await workflow_scope(session, actor, workflow_id)
         query = query.where(VirtualKey.workflow_id == workflow_id)
@@ -152,8 +159,7 @@ async def keys(
 @router.get("/admin/approvals")
 async def approvals(session: DbSession, actor: Actor) -> list[dict[str, Any]]:
     query = select(Approval).join(Workflow, Workflow.id == Approval.workflow_id)
-    if actor.client_id:
-        query = query.where(Workflow.client_id == actor.client_id)
+    query = query.where(Workflow.client_id.in_(permitted_clients(actor)))
     rows = (
         (await session.execute(query.order_by(Approval.created_at.desc()).limit(100)))
         .scalars()
@@ -193,8 +199,7 @@ async def action(approval_id: uuid.UUID, session: DbSession, actor: Actor) -> di
 @router.get("/admin/alerts")
 async def alerts(session: DbSession, actor: Actor) -> list[dict[str, Any]]:
     query = select(Alert)
-    if actor.client_id:
-        query = query.where(Alert.client_id == actor.client_id)
+    query = query.where(Alert.client_id.in_(permitted_clients(actor)))
     rows = (
         (await session.execute(query.order_by(Alert.created_at.desc()).limit(100))).scalars().all()
     )
@@ -214,23 +219,17 @@ async def alerts(session: DbSession, actor: Actor) -> list[dict[str, Any]]:
 @router.get("/admin/kill")
 async def kills(session: DbSession, actor: Actor) -> list[dict[str, Any]]:
     rows = (await session.execute(select(KillFlag))).scalars().all()
-    workflow_ids = (
-        set(
-            (
-                await session.execute(
-                    select(Workflow.id).where(Workflow.client_id == actor.client_id)
-                )
-            ).scalars()
-        )
-        if actor.client_id
-        else set()
+    client_ids: set[uuid.UUID] = set((await session.execute(permitted_clients(actor))).scalars())
+    workflow_ids = set(
+        (
+            await session.execute(select(Workflow.id).where(Workflow.client_id.in_(client_ids)))
+        ).scalars()
     )
     return [
         {"scope": r.scope, "scope_id": r.scope_id, "active": r.active, "reason": r.reason}
         for r in rows
-        if actor.client_id is None
-        or r.scope == "global"
-        or (r.scope == "client" and r.scope_id == str(actor.client_id))
+        if r.scope == "global"
+        or (r.scope == "client" and r.scope_id in {str(c) for c in client_ids})
         or (r.scope == "workflow" and r.scope_id in {str(w) for w in workflow_ids})
     ]
 
@@ -240,10 +239,9 @@ async def reconciliation(session: DbSession, actor: Actor) -> dict[str, Any]:
     job_query = select(ReconcileJob).order_by(ReconcileJob.day.desc()).limit(90)
     snapshot_query = select(ReconcileSnapshot).order_by(ReconcileSnapshot.day.desc()).limit(1000)
     account_query = select(ProviderAccount)
-    if actor.client_id:
-        job_query = job_query.where(ReconcileJob.client_id == actor.client_id)
-        snapshot_query = snapshot_query.where(ReconcileSnapshot.client_id == actor.client_id)
-        account_query = account_query.where(ProviderAccount.client_id == actor.client_id)
+    job_query = job_query.where(ReconcileJob.client_id.in_(permitted_clients(actor)))
+    snapshot_query = snapshot_query.where(ReconcileSnapshot.client_id.in_(permitted_clients(actor)))
+    account_query = account_query.where(ProviderAccount.client_id.in_(permitted_clients(actor)))
     jobs = (await session.execute(job_query)).scalars().all()
     snapshots = (await session.execute(snapshot_query)).scalars().all()
     accounts = (await session.execute(account_query)).scalars().all()

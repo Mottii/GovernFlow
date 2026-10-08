@@ -9,7 +9,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
-from admin_api.auth import Actor, DbSession, client_scope, permit, workflow_scope
+from admin_api.agencies import router as agencies_router
+from admin_api.auth import Actor, DbSession, client_scope, permit, platform_only, workflow_scope
 from admin_api.dashboard import router as dashboard_router
 from admin_api.reports import router as reports_router
 from admin_api.users import router as users_router
@@ -33,6 +34,7 @@ app = FastAPI(title="Governed Automation Admin API")
 app.add_exception_handler(GatewayError, openai_error_handler)
 app.include_router(human_router)
 app.include_router(users_router)
+app.include_router(agencies_router)
 app.include_router(dashboard_router)
 app.include_router(reports_router)
 
@@ -95,7 +97,7 @@ async def create_client(
     body: ClientCreate, session: DbSession, actor: Actor
 ) -> dict[str, str | int]:
     permit(actor, "admin")
-    client = Client(name=body.name, retention_days=body.retention_days)
+    client = Client(agency_id=actor.agency_id, name=body.name, retention_days=body.retention_days)
     session.add(client)
     await session.commit()
     return {"id": str(client.id), "name": client.name, "retention_days": client.retention_days}
@@ -104,7 +106,7 @@ async def create_client(
 @app.post("/admin/workflows", status_code=201)
 async def create_workflow(body: WorkflowCreate, session: DbSession, actor: Actor) -> dict[str, str]:
     permit(actor, "admin", "operator")
-    client_scope(actor, body.client_id)
+    await client_scope(session, actor, body.client_id)
     outage = body.policy.get("outage", {})
     if not isinstance(outage, dict) or outage.get("mode", "closed") not in ("open", "closed"):
         raise HTTPException(400, "Outage policy is invalid")
@@ -148,7 +150,7 @@ async def create_provider_credential(
     body: CredentialCreate, session: DbSession, actor: Actor
 ) -> dict[str, str]:
     permit(actor, "admin", "operator")
-    client_scope(actor, body.client_id)
+    await client_scope(session, actor, body.client_id)
     ciphertext, nonce = encrypt_provider_key(body.key, body.client_id, body.provider, body.label)
     credential = ProviderCredential(
         client_id=body.client_id,
@@ -202,7 +204,7 @@ async def change_kill_flag(
 ) -> dict[str, str | bool]:
     permit(actor, "admin", "operator")
     if body.scope == "global":
-        permit(actor, "admin")
+        platform_only(actor)
     if body.scope == "global" and body.scope_id:
         raise HTTPException(400, "Global scope_id must be empty")
     if body.scope != "global":
@@ -211,7 +213,7 @@ async def change_kill_flag(
         except ValueError as exc:
             raise HTTPException(400, "Client and workflow scope_id must be a UUID") from exc
     if body.scope == "client":
-        client_scope(actor, uuid.UUID(body.scope_id))
+        await client_scope(session, actor, uuid.UUID(body.scope_id))
     elif body.scope == "workflow":
         await workflow_scope(session, actor, uuid.UUID(body.scope_id))
     await session.execute(
@@ -261,7 +263,7 @@ class PriceCreate(BaseModel):
 
 @app.post("/admin/prices", status_code=201)
 async def create_price(body: PriceCreate, session: DbSession, actor: Actor) -> dict[str, str]:
-    permit(actor, "admin")
+    platform_only(actor)
     tier = body.meter.get("long_context")
     if tier:
         if (
@@ -293,7 +295,7 @@ async def create_price(body: PriceCreate, session: DbSession, actor: Actor) -> d
 
 @app.post("/admin/prices/seed")
 async def seed_prices(session: DbSession, actor: Actor) -> dict[str, int]:
-    permit(actor, "admin")
+    platform_only(actor)
     from core.pricing import seed
 
     return {"models": await seed(session)}
@@ -311,7 +313,7 @@ class AccountCreate(BaseModel):
 @app.post("/admin/provider-accounts", status_code=201)
 async def create_account(body: AccountCreate, session: DbSession, actor: Actor) -> dict[str, Any]:
     permit(actor, "admin", "operator")
-    client_scope(actor, body.client_id)
+    await client_scope(session, actor, body.client_id)
     import httpx
 
     validated = None

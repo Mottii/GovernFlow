@@ -6,12 +6,32 @@ from types import SimpleNamespace
 import httpx
 import pytest
 import pytest_asyncio
+from sqlalchemy import DDL, event
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from core.database import get_session
-from core.models import Base, Budget, Client, Price, ProviderCredential, VirtualKey, Workflow
+from core.models import (
+    Agency,
+    Base,
+    Budget,
+    Client,
+    Price,
+    ProviderCredential,
+    VirtualKey,
+    Workflow,
+)
 from core.security import encrypt_provider_key, virtual_key_hash
 from gateway.app import app
+
+# create_all is deliberately limited to tests; release installs use Alembic's backfill.
+event.listen(
+    Agency.__table__,
+    "after_create",
+    DDL(
+        "INSERT INTO agencies (id, name) VALUES "
+        "('00000000-0000-0000-0000-000000000001', 'Default agency')"
+    ),
+)
 
 
 @pytest_asyncio.fixture
