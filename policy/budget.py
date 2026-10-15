@@ -8,7 +8,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from audit.chain import AuditEventInput, append_event
-from core.models import Budget, Price, Reservation, Run
+from core.models import AgencyPrice, Budget, Price, Reservation, Run
 from core.usage import Usage
 from policy.loop import trip
 
@@ -54,6 +54,28 @@ def cost_micro(usage: Usage, price: Price) -> int:
 
 
 async def current_price(session: AsyncSession, provider: str, model: str) -> Price | None:
+    agency_id = session.info.get("agency_id")
+    if agency_id:
+        override = (
+            await session.execute(
+                select(AgencyPrice)
+                .where(
+                    AgencyPrice.agency_id == agency_id,
+                    AgencyPrice.provider == provider,
+                    AgencyPrice.model == model,
+                    AgencyPrice.effective_from <= datetime.now(UTC).date(),
+                )
+                .order_by(AgencyPrice.effective_from.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if override:
+            return Price(
+                provider=provider,
+                model=model,
+                effective_from=override.effective_from,
+                **override.rates,
+            )
     return (
         await session.execute(
             select(Price)

@@ -1,5 +1,6 @@
 """Upgrade acceptance against a populated 0014 installation."""
 
+import base64
 import os
 import subprocess
 import sys
@@ -14,7 +15,14 @@ async def test_agency_backfill_preserves_identifiers_credentials_and_grants():
     url = os.environ.get("TEST_DATABASE_URL")
     if not url:
         pytest.skip("TEST_DATABASE_URL is required")
-    env = {**os.environ, "DATABASE_URL": url}
+    env = {
+        **os.environ,
+        "DATABASE_URL": url,
+        "MASTER_ENCRYPTION_KEY": base64.b64encode(b"t" * 32).decode(),
+        "TELEGRAM_APPROVER_CHAT_IDS": "legacy-chat",
+        "APPROVAL_EMAIL_TO": "legacy@example.test",
+        "APPROVAL_WEBHOOK_URL": "https://legacy.test/secret",
+    }
     command = [sys.executable, "-m", "alembic"]
     subprocess.run([*command, "upgrade", "0014"], env=env, check=True, capture_output=True)
     engine = create_async_engine(url)
@@ -109,6 +117,26 @@ async def test_agency_backfill_preserves_identifiers_credentials_and_grants():
                 str((await conn.execute(text("SELECT agency_id FROM admin_sessions"))).scalar_one())
                 == "00000000-0000-0000-0000-000000000001"
             )
+            destinations = (
+                await conn.execute(
+                    text("SELECT enabled, client_id, config::text FROM integration_destinations")
+                )
+            ).all()
+            assert len(destinations) == 3 and all(
+                not d.enabled and d.client_id is None for d in destinations
+            )
+            assert all(
+                "legacy_ciphertext" in d.config
+                and "legacy@example.test" not in d.config
+                and "secret" not in d.config
+                for d in destinations
+            )
+            assert (
+                await conn.execute(text("SELECT count(*) FROM reviewer_group_members"))
+            ).scalar_one() == 2
+            assert (
+                await conn.execute(text("SELECT agency_id FROM workflows"))
+            ).scalar_one() is not None
         # A downgrade must refuse to broaden real multi-agency grants into legacy global access.
         async with engine.begin() as conn:
             other = (

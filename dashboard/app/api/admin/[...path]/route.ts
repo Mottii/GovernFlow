@@ -63,4 +63,4 @@ async function proxy(
     return unavailable();
   }
 }
-export { proxy as GET, proxy as POST, proxy as DELETE, proxy as PATCH };
+export { proxy as GET, proxy as POST, proxy as DELETE, proxy as PATCH, proxy as PUT };

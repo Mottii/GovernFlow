@@ -277,6 +277,8 @@ async def test_assignment_database_constraint_rejects_foreign_agency_client(gove
 
 @pytest.mark.asyncio
 async def test_virtual_key_context_tracks_agency_and_suspension(governed):
+    from core.models import VirtualKey, Workflow
+    from core.security import virtual_key_hash
     from gateway.auth import resolve_virtual_key
     from gateway.errors import GatewayError
 
@@ -284,19 +286,26 @@ async def test_virtual_key_context_tracks_agency_and_suspension(governed):
         agency = Agency(name="Moved fixture")
         session.add(agency)
         await session.flush()
-        await session.execute(
-            update(Client).where(Client.id == governed.b.client.id).values(agency_id=agency.id)
+        client = Client(agency_id=agency.id, name="New agency client")
+        session.add(client)
+        await session.flush()
+        workflow = Workflow(client_id=client.id, name="isolated", risk_class="R1", policy={})
+        session.add(workflow)
+        await session.flush()
+        key = "gk_new_agency_key"
+        session.add(
+            VirtualKey(workflow_id=workflow.id, key_hash=virtual_key_hash(key), prefix=key[:8])
         )
         await session.commit()
-        auth = await resolve_virtual_key(session, governed.b.key)
-        assert auth.agency_id == agency.id and auth.client_id == governed.b.client.id
-        assert auth.workflow_id == governed.b.workflow.id
+        auth = await resolve_virtual_key(session, key)
+        assert auth.agency_id == agency.id and auth.client_id == client.id
+        assert auth.workflow_id == workflow.id
         await session.execute(
             update(Agency).where(Agency.id == agency.id).values(status="suspended")
         )
         await session.commit()
         with pytest.raises(GatewayError) as error:
-            await resolve_virtual_key(session, governed.b.key)
+            await resolve_virtual_key(session, key)
         assert error.value.status_code == 401
     async with governed.factory() as session:
         assert (

@@ -13,7 +13,7 @@ from starlette.exceptions import HTTPException
 
 from approvals.routes import router as approval_router
 from core.database import get_session
-from core.models import Price
+from core.models import AgencyPrice, Price
 from gateway.adapters.openai import ChatStreamTracker, chat_usage
 from gateway.anthropic import router as anthropic_router
 from gateway.auth import AuthContext, authenticate_openai
@@ -61,11 +61,21 @@ async def list_models(
             .order_by(Price.model)
         )
     ).scalars()
+    overrides = (
+        await session.execute(
+            select(AgencyPrice.model).where(
+                AgencyPrice.agency_id == auth.agency_id,
+                AgencyPrice.provider == "openai",
+                AgencyPrice.effective_from <= datetime.now(UTC).date(),
+            )
+        )
+    ).scalars()
+    model_names = sorted(set(names) | set(overrides))
     return {
         "object": "list",
         "data": [
             {"id": name, "object": "model", "created": 0, "owned_by": "openai"}
-            for name in names
+            for name in model_names
             if any(fnmatchcase(name, pattern) for pattern in allowed)
         ],
     }

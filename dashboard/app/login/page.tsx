@@ -3,6 +3,7 @@ import { useState } from "react";
 import { ShieldCheck, ArrowRight } from "lucide-react";
 export default function Login() {
   const [error, setError] = useState("");
+  const [agencies, setAgencies] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -16,10 +17,16 @@ export default function Login() {
         body: JSON.stringify({
           email: form.get("email"),
           password: form.get("password"),
+          ...(form.get("agency_id") ? {agency_id: form.get("agency_id")} : {}),
         }),
       });
       const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || "Sign in failed");
+      if (response.status === 409 && data.detail?.agency_ids) {
+        setAgencies(data.detail.agency_ids);
+        setBusy(false);
+        return;
+      }
+      if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Sign in failed");
       window.location.assign("/");
     } catch (error) {
       setError(error instanceof Error ? error.message : "Sign in failed");
@@ -75,6 +82,9 @@ export default function Login() {
                 required
               />
             </label>
+            {agencies.length > 0 && <label>Agency
+              <select name="agency_id" required>{agencies.map(id => <option key={id} value={id}>{id}</option>)}</select>
+            </label>}
             {error && (
               <p className="error" role="alert">
                 {error}

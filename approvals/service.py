@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from approvals.expiry import expire_record
 from approvals.signing import sign
 from audit.chain import AuditEventInput, append_event
-from core.models import DEFAULT_AGENCY_ID, Approval, Notification, Workflow
+from core.models import Approval, IntegrationDestination, Notification, Workflow
 from core.security import decrypt_provider_key, encrypt_provider_key
 from gateway.auth import AuthContext
 from gateway.errors import GatewayError
@@ -181,16 +181,35 @@ async def check(session: AsyncSession, auth: AuthContext, body: ActionCheck) -> 
             ),
         )
     if record.status == "pending":
-        channels = auth.policy.get("approval_channels", ["telegram"])
+        channels = auth.policy.get("approval_channels", ["telegram", "email", "webhook"])
         if not isinstance(channels, list) or any(
             channel not in ("telegram", "email", "webhook") for channel in channels
         ):
             raise GatewayError(503, "invalid_policy", "Approval notification channels are invalid")
-        if auth.agency_id != DEFAULT_AGENCY_ID:
-            channels = []  # Scoped destinations are required before enabling new agencies.
+        from approvals.reviewers import destination_matches
+
         await session.flush()
-        for channel in set(channels):
-            session.add(Notification(approval_id=record.id, channel=channel))
+        workflow = await session.get(Workflow, auth.workflow_id)
+        assert workflow is not None
+        destinations = (
+            await session.execute(
+                select(IntegrationDestination).where(
+                    IntegrationDestination.agency_id == auth.agency_id,
+                    IntegrationDestination.client_id == auth.client_id,
+                    IntegrationDestination.enabled.is_(True),
+                    IntegrationDestination.channel.in_(channels),
+                )
+            )
+        ).scalars()
+        for destination in destinations:
+            if await destination_matches(session, destination, workflow):
+                session.add(
+                    Notification(
+                        approval_id=record.id,
+                        channel=destination.channel,
+                        destination_id=destination.id,
+                    )
+                )
     await session.commit()
     return view(record)
 

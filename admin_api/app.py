@@ -6,12 +6,14 @@ from typing import Any, Literal
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from admin_api.agencies import router as agencies_router
 from admin_api.auth import Actor, DbSession, client_scope, permit, platform_only, workflow_scope
 from admin_api.dashboard import router as dashboard_router
+from admin_api.integrations import router as integrations_router
 from admin_api.reports import router as reports_router
 from admin_api.users import router as users_router
 from approvals.human import router as human_router
@@ -35,6 +37,7 @@ app.add_exception_handler(GatewayError, openai_error_handler)
 app.include_router(human_router)
 app.include_router(users_router)
 app.include_router(agencies_router)
+app.include_router(integrations_router)
 app.include_router(dashboard_router)
 app.include_router(reports_router)
 
@@ -241,7 +244,9 @@ async def action_decision(
     approval = await session.get(Approval, approval_id)
     if approval is None:
         raise HTTPException(404, "Approval not found")
-    await workflow_scope(session, actor, approval.workflow_id)
+    from approvals.reviewers import require_reviewer
+
+    await require_reviewer(session, actor, approval.workflow_id)
     if actor.user_id:
         body = body.model_copy(update={"approver": actor.email})
     return await decide(session, approval_id, body)
@@ -261,9 +266,7 @@ class PriceCreate(BaseModel):
     meter: dict[str, Any] = Field(default_factory=dict)
 
 
-@app.post("/admin/prices", status_code=201)
-async def create_price(body: PriceCreate, session: DbSession, actor: Actor) -> dict[str, str]:
-    platform_only(actor)
+def validate_price(body: PriceCreate) -> None:
     tier = body.meter.get("long_context")
     if tier:
         if (
@@ -284,6 +287,12 @@ async def create_price(body: PriceCreate, session: DbSession, actor: Actor) -> d
                 raise HTTPException(
                     400, "Long-context multipliers must be positive integer fractions"
                 )
+
+
+@app.post("/admin/prices", status_code=201)
+async def create_price(body: PriceCreate, session: DbSession, actor: Actor) -> dict[str, str]:
+    platform_only(actor)
+    validate_price(body)
     session.add(Price(**body.model_dump(), verified_at=datetime.now(UTC)))
     try:
         await session.commit()
@@ -291,6 +300,63 @@ async def create_price(body: PriceCreate, session: DbSession, actor: Actor) -> d
         await session.rollback()
         raise HTTPException(409, "Price effective date already exists") from exc
     return {"provider": body.provider, "model": body.model}
+
+
+@app.post("/admin/agency-prices", status_code=201)
+async def override_price(body: PriceCreate, session: DbSession, actor: Actor) -> dict[str, str]:
+    from core.models import AgencyPrice
+
+    permit(actor, "admin")
+    validate_price(body)
+    session.add(
+        AgencyPrice(
+            agency_id=actor.agency_id,
+            provider=body.provider,
+            model=body.model,
+            effective_from=body.effective_from,
+            rates=body.model_dump(mode="json", exclude={"provider", "model", "effective_from"}),
+            updated_by=actor.email,
+        )
+    )
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(409, "Price override effective date already exists") from exc
+    return {"provider": body.provider, "model": body.model}
+
+
+@app.get("/admin/agency-prices")
+async def agency_prices(session: DbSession, actor: Actor) -> list[dict[str, Any]]:
+    from core.models import AgencyPrice
+
+    permit(actor, "admin")
+    rows = (
+        await session.execute(select(AgencyPrice).where(AgencyPrice.agency_id == actor.agency_id))
+    ).scalars()
+    return [
+        {
+            "provider": r.provider,
+            "model": r.model,
+            "effective_from": r.effective_from.isoformat(),
+            **r.rates,
+        }
+        for r in rows
+    ]
+
+
+@app.delete("/admin/agency-prices/{provider}/{model}/{effective_from}", status_code=204)
+async def delete_agency_price(
+    provider: str, model: str, effective_from: date, session: DbSession, actor: Actor
+) -> None:
+    from core.models import AgencyPrice
+
+    permit(actor, "admin")
+    record = await session.get(AgencyPrice, (actor.agency_id, provider, model, effective_from))
+    if record is None:
+        raise HTTPException(404, "Price override not found")
+    await session.delete(record)
+    await session.commit()
 
 
 @app.post("/admin/prices/seed")

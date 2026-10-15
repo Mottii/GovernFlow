@@ -53,7 +53,12 @@ async def require_admin(
     expected = os.environ.get("ADMIN_TOKEN", "")
     if expected and hmac.compare_digest(supplied.encode(), expected.encode()):
         await set_agency_context(session, DEFAULT_AGENCY_ID)
-        return Principal("admin", platform_maintenance=True)
+        return Principal(
+            "admin",
+            platform_maintenance=(
+                not agency_rls_enabled() or os.environ.get("MAINTENANCE_MODE", "").lower() == "true"
+            ),
+        )
     if agency_rls_enabled():
         agency_id = (
             await session.execute(

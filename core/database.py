@@ -20,7 +20,28 @@ def database_url() -> str:
 
 
 def make_engine(url: str | None = None) -> AsyncEngine:
-    return create_async_engine(url or database_url(), pool_pre_ping=True)
+    result = create_async_engine(url or database_url(), pool_pre_ping=True)
+
+    @event.listens_for(result.sync_engine, "connect")
+    def restricted_login(connection: object, record: object) -> None:
+        if not agency_rls_enabled() or os.environ.get("MAINTENANCE_MODE", "").lower() == "true":
+            return
+        cursor = connection.cursor()  # type: ignore[attr-defined]
+        try:
+            cursor.execute("""SELECT r.rolsuper OR r.rolbypassrls OR r.rolcreaterole
+                OR r.rolcreatedb OR r.rolreplication
+                OR NOT pg_has_role(current_user,'governflow_runtime','USAGE')
+                OR EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+                    WHERE n.nspname='public' AND pg_has_role(current_user,c.relowner,'USAGE'))
+                OR EXISTS (SELECT 1 FROM pg_database d WHERE d.datname=current_database()
+                    AND pg_has_role(current_user,d.datdba,'USAGE'))
+                FROM pg_roles r WHERE r.rolname=current_user""")
+            if cursor.fetchone()[0]:
+                raise RuntimeError("Runtime DATABASE_URL must use a restricted non-owner login")
+        finally:
+            cursor.close()
+
+    return result
 
 
 engine = make_engine()
@@ -63,7 +84,9 @@ async def agency_sessions() -> AsyncIterator[AsyncSession]:
 
     # The worker enumerates agencies, then every job transaction uses exactly one context.
     async with session_factory() as directory:
-        agencies = list((await directory.execute(select(Agency.id))).scalars())
+        agencies = list(
+            (await directory.execute(select(Agency.id).where(Agency.status == "active"))).scalars()
+        )
     for agency_id in agencies:
         async with session_factory() as session:
             await set_agency_context(session, agency_id)

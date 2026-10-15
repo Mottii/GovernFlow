@@ -5,7 +5,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.exc import IntegrityError
 
 from admin_api.auth import Actor, DbSession, client_scope, permit, platform_only
@@ -47,9 +47,11 @@ async def save_membership(
     session: DbSession, agency_id: uuid.UUID, user_id: uuid.UUID, body: MembershipChange
 ) -> dict[str, Any]:
     # Serialize permission administration within an agency to protect the last administrator.
-    record = (
-        await session.execute(select(Agency).where(Agency.id == agency_id).with_for_update())
-    ).scalar_one_or_none()
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
+        {"key": "agency-permissions:" + str(agency_id)},
+    )
+    record = await session.get(Agency, agency_id)
     if record is None or await session.get(User, user_id) is None:
         raise HTTPException(404, "Resource not found")
     if body.all_clients and body.client_ids:

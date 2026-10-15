@@ -9,21 +9,22 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from approvals.reviewers import destination_matches, recipients
 from approvals.service import content
 from approvals.signing import b64, secret, sign
-from core.models import DEFAULT_AGENCY_ID, Alert, Approval, Client, Notification, Workflow
+from core.models import (
+    Alert,
+    Approval,
+    ExternalLoginIdentity,
+    IntegrationDestination,
+    Notification,
+    Workflow,
+)
+from core.security import decrypt_provider_key
 from gateway.errors import GatewayError
-
-
-def chat_ids() -> list[str]:
-    return [
-        value.strip()
-        for value in os.environ.get("TELEGRAM_APPROVER_CHAT_IDS", "").split(",")
-        if value.strip()
-    ]
 
 
 def callback(approval_id: uuid.UUID, choice: str, chat_id: str) -> str:
@@ -49,9 +50,8 @@ def review_link(record: Approval, channel: str) -> str:
     )
 
 
-async def telegram(record: Approval, action: dict[str, Any]) -> None:
+async def telegram(record: Approval, action: dict[str, Any], chats: list[str]) -> None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chats = chat_ids()
     if not token or not chats:
         raise RuntimeError("Telegram is not configured")
     details = json.dumps(action, ensure_ascii=False, indent=2)
@@ -110,25 +110,75 @@ async def dispatch(session: AsyncSession) -> int:
         ):
             item.status = "cancelled"
             continue
-        client_id = (
+        workflow = await session.get(Workflow, approval.workflow_id)
+        if workflow is not None:
             await session.execute(
-                select(Workflow.client_id).where(Workflow.id == approval.workflow_id)
+                text("SELECT pg_advisory_xact_lock_shared(hashtext(:key))"),
+                {"key": "agency-permissions:" + str(workflow.agency_id)},
             )
-        ).scalar_one()
-        agency_id = (
-            await session.execute(select(Client.agency_id).where(Client.id == client_id))
-        ).scalar_one()
-        if agency_id != DEFAULT_AGENCY_ID:
+        destination = (
+            await session.get(IntegrationDestination, item.destination_id)
+            if item.destination_id
+            else None
+        )
+        if (
+            workflow is None
+            or destination is None
+            or not await destination_matches(session, destination, workflow)
+        ):
             item.status = "cancelled"
             continue
+        client_id = workflow.client_id
         try:
             from approvals.channels import email, webhook
 
-            senders = {"telegram": telegram, "email": email, "webhook": webhook}
-            await senders[item.channel](approval, content(approval, client_id))
+            action = content(approval, client_id)
+            if destination.channel == "webhook":
+                if destination.secret_ciphertext is None or destination.secret_nonce is None:
+                    raise RuntimeError("Destination credential is missing")
+                key = decrypt_provider_key(
+                    destination.secret_ciphertext,
+                    destination.secret_nonce,
+                    destination.agency_id,
+                    "integration",
+                    str(destination.id),
+                )
+                await webhook(approval, action, destination.config["url"], key.encode())
+            else:
+                actors = await recipients(session, destination, workflow)
+                if destination.channel == "email":
+                    for actor in actors:
+                        await email(approval, action, actor.email)
+                    delivered = bool(actors)
+                else:
+                    user_ids = [a.user_id for a in actors]
+                    chats = list(
+                        (
+                            await session.execute(
+                                select(ExternalLoginIdentity.subject).where(
+                                    ExternalLoginIdentity.issuer == "telegram",
+                                    ExternalLoginIdentity.user_id.in_(user_ids),
+                                )
+                            )
+                        ).scalars()
+                    )
+                    delivered = bool(chats)
+                    if chats:
+                        await telegram(approval, action, chats)
+                if not delivered:
+                    item.status = "cancelled"
+                    continue
             item.status = "sent"
             sent += 1
-        except (httpx.HTTPError, RuntimeError, smtplib.SMTPException, OSError, GatewayError):
+        except (
+            httpx.HTTPError,
+            RuntimeError,
+            smtplib.SMTPException,
+            OSError,
+            GatewayError,
+            KeyError,
+            ValueError,
+        ):
             if item.attempts == 0:
                 session.add(
                     Alert(

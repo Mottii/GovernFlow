@@ -186,7 +186,9 @@ async def action(approval_id: uuid.UUID, session: DbSession, actor: Actor) -> di
     record = await session.get(Approval, approval_id)
     if record is None:
         raise HTTPException(404, "Approval not found")
-    workflow = await workflow_scope(session, actor, record.workflow_id)
+    from approvals.reviewers import require_reviewer
+
+    workflow = await require_reviewer(session, actor, record.workflow_id)
     return {
         "id": str(record.id),
         "action_name": record.action_name,

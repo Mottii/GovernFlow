@@ -134,3 +134,56 @@ async def governed(monkeypatch: pytest.MonkeyPatch, tmp_path):
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)
         await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def review_team(governed):
+    from admin_api.app import app as admin_app
+
+    headers = {"authorization": "Bearer test-admin"}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=admin_app), base_url="http://admin"
+    ) as admin:
+        email = "reviewer@client-a.test"
+        result = await admin.post(
+            "/admin/users",
+            headers=headers,
+            json={
+                "email": email,
+                "password": "review acceptance password",
+                "role": "approver",
+                "client_id": str(governed.a.client.id),
+            },
+        )
+        assert result.status_code == 201, result.text
+        user_id = result.json()["id"]
+        login = await admin.post(
+            "/admin/auth/login", json={"email": email, "password": "review acceptance password"}
+        )
+        actor = {"authorization": "Bearer " + login.json()["token"]}
+        group = await admin.post(
+            "/admin/reviewer-groups",
+            headers=headers,
+            json={
+                "client_id": str(governed.a.client.id),
+                "name": "Reviewers",
+                "user_ids": [user_id],
+            },
+        )
+        assert group.status_code == 201, group.text
+        group_id = group.json()["id"]
+        assigned = await admin.put(
+            f"/admin/reviewer-groups/{group_id}/assignments",
+            headers=headers,
+            json={"workflow_ids": [str(governed.a.workflow.id)]},
+        )
+        assert assigned.status_code == 200, assigned.text
+        yield SimpleNamespace(
+            admin=admin,
+            headers=headers,
+            actor=actor,
+            email=email,
+            user_id=user_id,
+            group_id=group_id,
+            client_id=str(governed.a.client.id),
+        )

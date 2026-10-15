@@ -258,7 +258,9 @@ async def isolated_database(monkeypatch):
 
         admin_app.dependency_overrides[get_session] = runtime_session
         gateway_app.dependency_overrides[get_session] = runtime_session
-        yield SimpleNamespace(runtime=runtime, owner=owner, tenants=tenants, role=role)
+        yield SimpleNamespace(
+            runtime=runtime, owner=owner, tenants=tenants, role=role, runtime_url=runtime_url
+        )
     finally:
         admin_app.dependency_overrides.clear()
         gateway_app.dependency_overrides.clear()
@@ -310,7 +312,7 @@ async def test_runtime_rls_reads_writes_privileges_and_transaction_context(isola
         )
         assert result.rowcount == 0
         await session.commit()
-        with pytest.raises(DBAPIError, match="row-level security"):
+        with pytest.raises(DBAPIError, match="row-level security|Agency ownership|foreign key"):
             await session.execute(
                 text(
                     "INSERT INTO workflows (client_id, name, risk_class) "
@@ -320,7 +322,7 @@ async def test_runtime_rls_reads_writes_privileges_and_transaction_context(isola
             )
         await session.rollback()
         # Secondary references cannot splice runs and budgets from different agencies.
-        with pytest.raises(DBAPIError, match="row-level security"):
+        with pytest.raises(DBAPIError, match="row-level security|Agency ownership|foreign key"):
             await session.execute(
                 text(
                     "INSERT INTO reservations (budget_id, run_id, est_micro) "
@@ -404,3 +406,463 @@ async def test_runtime_password_session_key_and_separate_settlement_transactions
         for tenant in (a, b):
             budget = await session.get(Budget, tenant.budget.id)
             assert budget.spent_micro == 15 and budget.reserved_micro == 10
+
+
+@pytest.mark.asyncio
+async def test_scoped_reviews_destinations_prices_and_workers_on_runtime_login(
+    isolated_database, monkeypatch
+):
+    import json
+    import time
+
+    from sqlalchemy import update
+
+    from approvals.channels import signature
+    from approvals.notifications import callback, dispatch, review_link
+    from core.models import (
+        AgencyPrice,
+        IntegrationDestination,
+        ReviewerAssignment,
+        ReviewerGroup,
+        ReviewerGroupMember,
+        TelegramLinkChallenge,
+    )
+    from policy.budget import current_price
+
+    db = isolated_database
+    monkeypatch.setenv("TELEGRAM_WEBHOOK_SECRET", "fixture-transport-secret")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "mock-bot")
+    monkeypatch.setenv("TELEGRAM_APPROVER_CHAT_IDS", "999")
+    monkeypatch.setenv("APPROVAL_EMAIL_TO", "global@forbidden.test")
+    monkeypatch.setenv("SMTP_HOST", "smtp.test")
+    monkeypatch.setenv("SMTP_FROM", "sender@example.test")
+    messages = []
+
+    class SMTP:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def starttls(self, **kwargs):
+            pass
+
+        def send_message(self, message):
+            messages.append(message)
+
+    monkeypatch.setattr("smtplib.SMTP", SMTP)
+
+    async def public_url(url):
+        assert url == "https://hook.test/approval"
+
+    monkeypatch.setattr("approvals.channels.public_webhook_url", public_url)
+    async with db.owner() as session:
+        for index in (0, 2):
+            tenant = db.tenants[index]
+            user = User(
+                email=f"admin{index}@fixture.test",
+                role="admin",
+                password_hash=b"fixture",
+                password_salt=b"fixture",
+            )
+            session.add(user)
+            await session.flush()
+            session.add(
+                AgencyMembership(
+                    agency_id=tenant.agency_id, user_id=user.id, role="admin", all_clients=True
+                )
+            )
+            await session.flush()
+            session.add(
+                AdminSession(
+                    token_hash=token_hash(f"admin-{index}"),
+                    user_id=user.id,
+                    agency_id=tenant.agency_id,
+                    expires_at=datetime.now(UTC) + timedelta(hours=1),
+                )
+            )
+        for tenant in db.tenants:
+            await session.execute(
+                update(AgencyMembership)
+                .where(
+                    AgencyMembership.agency_id == tenant.agency_id,
+                    AgencyMembership.user_id == tenant.user.id,
+                )
+                .values(role="approver")
+            )
+        await session.commit()
+    async with (
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=admin_app), base_url="http://admin"
+        ) as admin,
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=gateway_app), base_url="http://gateway"
+        ) as gateway,
+    ):
+        destinations = []
+        groups = []
+        checks = []
+        for i, tenant in enumerate(db.tenants):
+            headers = {"authorization": f"Bearer admin-{0 if i < 2 else 2}"}
+            actor = {"authorization": "Bearer session-" + tenant.client.name}
+            group = await admin.post(
+                "/admin/reviewer-groups",
+                headers=headers,
+                json={
+                    "client_id": str(tenant.client.id),
+                    "name": "Assigned team",
+                    "user_ids": [str(tenant.user.id)],
+                },
+            )
+            assert group.status_code == 201, group.text
+            group_id = group.json()["id"]
+            groups.append(group_id)
+            assert (
+                await admin.put(
+                    f"/admin/reviewer-groups/{group_id}/assignments",
+                    headers=headers,
+                    json={"workflow_ids": [str(tenant.workflow.id)]},
+                )
+            ).status_code == 200
+            for channel in ("email", "telegram", "webhook"):
+                result = await admin.post(
+                    "/admin/integration-destinations",
+                    headers=headers,
+                    json={
+                        "name": channel,
+                        "channel": channel,
+                        "client_id": str(tenant.client.id),
+                        "group_id": group_id,
+                        "workflow_id": str(tenant.workflow.id),
+                        "enabled": True,
+                        "url": "https://hook.test/approval" if channel == "webhook" else None,
+                        "service_identity": tenant.client.name if channel == "webhook" else None,
+                    },
+                )
+                assert result.status_code == 201, result.text
+                if channel == "webhook":
+                    destinations.append(result.json())
+            challenge = await admin.post("/admin/telegram/link", headers=actor)
+            assert challenge.status_code == 201, challenge.text
+            chat = 101 + i
+            linked = await admin.post(
+                "/integrations/telegram",
+                headers={"x-telegram-bot-api-secret-token": "fixture-transport-secret"},
+                json={
+                    "message": {
+                        "from": {"id": chat},
+                        "chat": {"id": chat, "type": "private"},
+                        "text": challenge.json()["command"],
+                    }
+                },
+            )
+            assert linked.status_code == 200, linked.text
+            check = await gateway.post(
+                "/v1/actions/check",
+                headers={"authorization": "Bearer " + tenant.key},
+                json={
+                    "action_name": "publish",
+                    "summary": "Private " + tenant.client.name,
+                    "action": {"private": tenant.client.name},
+                },
+            )
+            assert check.status_code == 200, check.text
+            checks.append(check.json()["approval_id"])
+        retarget = await admin.put(
+            "/admin/integration-destinations/" + destinations[0]["id"],
+            headers={"authorization": "Bearer admin-0"},
+            json={
+                "name": "retargeted",
+                "channel": "webhook",
+                "client_id": str(db.tenants[1].client.id),
+                "enabled": True,
+                "url": "https://hook.test/approval",
+                "service_identity": "A2",
+            },
+        )
+        assert retarget.status_code == 400
+        for i in (0, 2):
+            headers = {"authorization": f"Bearer admin-{i}"}
+            result = await admin.post(
+                "/admin/agency-prices",
+                headers=headers,
+                json={
+                    "provider": "openai",
+                    "model": "gpt-mock",
+                    "effective_from": "2020-01-01",
+                    "input": 100 + i,
+                    "output": 200 + i,
+                    "source_url": "https://fixture.test/price",
+                },
+            )
+            assert result.status_code == 201, result.text
+            assert (await admin.post("/admin/prices/seed", headers=headers)).status_code == 403
+            assert len((await admin.get("/admin/agency-prices", headers=headers)).json()) == 1
+            foreign = destinations[2 if i == 0 else 0]
+            assert (
+                await admin.put(
+                    "/admin/integration-destinations/" + foreign["id"],
+                    headers=headers,
+                    json={"name": "forged", "channel": "webhook"},
+                )
+            ).status_code == 404
+        tables = (
+            ReviewerGroup,
+            ReviewerGroupMember,
+            ReviewerAssignment,
+            IntegrationDestination,
+            TelegramLinkChallenge,
+            AgencyPrice,
+        )
+        async with db.runtime() as session:
+            for table in tables:
+                assert (
+                    await session.execute(select(func.count()).select_from(table))
+                ).scalar_one() == 0
+        with respx.mock(assert_all_called=True) as mock:
+            tg = mock.post("https://api.telegram.org/botmock-bot/sendMessage").respond(
+                200, json={"ok": True}
+            )
+            hooks = mock.post("https://hook.test/approval").respond(200)
+            for i in (0, 2):
+                async with db.runtime() as session:
+                    await set_agency_context(session, db.tenants[i].agency_id)
+                    assert await dispatch(session) == 6
+                    assert await dispatch(session) == 0
+                    assert (await current_price(session, "openai", "gpt-mock")).input == 100 + i
+                    assert (
+                        await session.execute(
+                            select(func.count()).select_from(IntegrationDestination)
+                        )
+                    ).scalar_one() == 6
+                    foreign = db.tenants[2 if i == 0 else 0]
+                    with pytest.raises(DBAPIError):
+                        await session.execute(
+                            text(
+                                "INSERT INTO reviewer_assignments "
+                                "(id,agency_id,client_id,group_id,workflow_id) "
+                                "VALUES(gen_random_uuid(),:agency,:client,:group,:workflow)"
+                            ),
+                            {
+                                "agency": db.tenants[i].agency_id,
+                                "client": db.tenants[i].client.id,
+                                "group": uuid.UUID(groups[i]),
+                                "workflow": foreign.workflow.id,
+                            },
+                        )
+                    await session.rollback()
+            assert tg.call_count == 4 and hooks.call_count == 4
+            assert {json.loads(c.request.content)["chat_id"] for c in tg.calls} == {
+                str(101 + i) for i in range(4)
+            }
+        assert {str(m["To"]) for m in messages} == {t.user.email for t in db.tenants}
+        for i, tenant in enumerate(db.tenants):
+            actor = {"authorization": "Bearer session-" + tenant.client.name}
+            async with db.runtime() as session:
+                await set_agency_context(session, tenant.agency_id)
+                record = await session.get(Approval, uuid.UUID(checks[i]))
+                link = review_link(record, "email:forwarded")
+            assert (await admin.get(link, headers=actor)).status_code == 200
+            foreign_actor = {
+                "authorization": "Bearer session-" + db.tenants[(i + 1) % 4].client.name
+            }
+            assert (await admin.get(link, headers=foreign_actor)).status_code == 404
+            from urllib.parse import parse_qs, urlsplit
+
+            token = parse_qs(urlsplit(link).query)["token"][0]
+            assert (
+                await admin.post(
+                    "/review/" + checks[i],
+                    headers=foreign_actor,
+                    data={"token": token, "decision": "approve"},
+                )
+            ).status_code == 404
+            wrong = 102 + i if i < 3 else 101
+            forwarded = {
+                "callback_query": {
+                    "from": {"id": wrong},
+                    "message": {"chat": {"id": wrong}},
+                    "data": callback(uuid.UUID(checks[i]), "a", str(wrong)),
+                }
+            }
+            assert (
+                await admin.post(
+                    "/integrations/telegram",
+                    headers={"x-telegram-bot-api-secret-token": "fixture-transport-secret"},
+                    json=forwarded,
+                )
+            ).status_code in (403, 404)
+        # Removal invalidates an already delivered link and a signed Telegram callback.
+        headers = {"authorization": "Bearer admin-0"}
+        assert (
+            await admin.put(
+                f"/admin/reviewer-groups/{groups[0]}/assignments",
+                headers=headers,
+                json={"workflow_ids": []},
+            )
+        ).status_code == 200
+        async with db.runtime() as session:
+            await set_agency_context(session, db.tenants[0].agency_id)
+            link = review_link(await session.get(Approval, uuid.UUID(checks[0])), "email:old")
+        assert (
+            await admin.get(link, headers={"authorization": "Bearer session-A1"})
+        ).status_code == 403
+        tg_body = {
+            "callback_query": {
+                "from": {"id": 101},
+                "message": {"chat": {"id": 101}},
+                "data": callback(uuid.UUID(checks[0]), "a", "101"),
+            }
+        }
+        assert (
+            await admin.post(
+                "/integrations/telegram",
+                headers={"x-telegram-bot-api-secret-token": "fixture-transport-secret"},
+                json=tg_body,
+            )
+        ).status_code == 403
+        # Destinations cannot choose another client or submit their own reviewer identity.
+        for i, destination in enumerate(destinations):
+            key = destination["credential"].encode()
+            endpoint = "/integrations/webhook/" + destination["id"] + "/decision"
+
+            async def decision(approval_id, endpoint=endpoint, destination=destination, key=key):
+                raw = json.dumps(
+                    {
+                        "event_id": str(uuid.uuid4()),
+                        "approval_id": approval_id,
+                        "decision": "approve",
+                        "approver": "forged-admin",
+                    }
+                ).encode()
+                timestamp = str(int(time.time()))
+                return await admin.post(
+                    endpoint,
+                    content=raw,
+                    headers={
+                        "authorization": "Bearer " + destination["credential"],
+                        "x-gas-timestamp": timestamp,
+                        "x-gas-signature": signature(timestamp, raw, key),
+                    },
+                )
+
+            assert (await decision(checks[(i + 1) % 4])).status_code in (403, 404)
+            result = await decision(checks[i])
+            assert result.status_code == 200, result.text
+        # Both human channels also record valid decisions under the restricted login.
+        for i, channel in ((1, "telegram"), (2, "email")):
+            tenant = db.tenants[i]
+            checked = await gateway.post(
+                "/v1/actions/check",
+                headers={"authorization": "Bearer " + tenant.key},
+                json={
+                    "action_name": "publish",
+                    "summary": "Human decision",
+                    "action": {"client": tenant.client.name},
+                },
+            )
+            identity = checked.json()["approval_id"]
+            if channel == "telegram":
+                response = await admin.post(
+                    "/integrations/telegram",
+                    headers={"x-telegram-bot-api-secret-token": "fixture-transport-secret"},
+                    json={
+                        "callback_query": {
+                            "from": {"id": 102},
+                            "message": {"chat": {"id": 102}},
+                            "data": callback(uuid.UUID(identity), "a", "102"),
+                        }
+                    },
+                )
+                approver = "telegram:" + str(tenant.user.id)
+            else:
+                async with db.runtime() as session:
+                    await set_agency_context(session, tenant.agency_id)
+                    link = review_link(
+                        await session.get(Approval, uuid.UUID(identity)), "email:personal"
+                    )
+                from urllib.parse import parse_qs, urlsplit
+
+                token = parse_qs(urlsplit(link).query)["token"][0]
+                response = await admin.post(
+                    "/review/" + identity,
+                    headers={"authorization": "Bearer session-" + tenant.client.name},
+                    data={"token": token, "decision": "approve"},
+                )
+                approver = tenant.user.email
+            assert response.status_code == 200, response.text
+            async with db.owner() as session:
+                assert (await session.get(Approval, uuid.UUID(identity))).approver == approver
+        async with db.owner() as session:
+            for i, tenant in enumerate(db.tenants):
+                record = await session.get(Approval, uuid.UUID(checks[i]))
+                assert (
+                    record.approver == "webhook:" + destinations[i]["id"] + ":" + tenant.client.name
+                )
+
+
+@pytest.mark.asyncio
+async def test_runtime_configuration_refuses_owner_and_accepts_restricted_login(
+    isolated_database, monkeypatch
+):
+    from core.database import make_engine
+
+    monkeypatch.delenv("MAINTENANCE_MODE", raising=False)
+    owner = make_engine(os.environ["TEST_DATABASE_URL"])
+    runtime = make_engine(str(isolated_database.runtime_url.render_as_string(hide_password=False)))
+    try:
+        with pytest.raises(RuntimeError, match="restricted non-owner"):
+            async with owner.connect():
+                pass
+        async with runtime.connect() as connection:
+            assert (
+                await connection.execute(text("SELECT count(*) FROM clients"))
+            ).scalar_one() == 0
+            assert (
+                await connection.execute(text("SELECT current_user"))
+            ).scalar_one() == isolated_database.role
+    finally:
+        await owner.dispose()
+        await runtime.dispose()
+
+
+@pytest.mark.asyncio
+async def test_background_expiry_reaping_and_directory_keep_agency_context(
+    isolated_database, monkeypatch
+):
+    from sqlalchemy import update
+
+    import core.database as database
+    from approvals.expiry import expire_pending
+    from policy.reap import reap_stale
+
+    db = isolated_database
+    past = datetime.now(UTC) - timedelta(hours=2)
+    async with db.owner() as session:
+        await session.execute(update(Approval).values(expires_at=past))
+        await session.execute(update(Reservation).values(created_at=past))
+        await session.commit()
+    monkeypatch.setattr(database, "session_factory", db.runtime)
+    visited = []
+    async for session in database.agency_sessions():
+        agency_id = session.info["agency_id"]
+        visited.append(agency_id)
+        assert await expire_pending(session) == 2
+        assert await reap_stale(session, datetime.now(UTC) - timedelta(hours=1)) == 2
+        assert (
+            await session.execute(
+                select(func.count()).select_from(Approval).where(Approval.status == "expired")
+            )
+        ).scalar_one() == 2
+        async with db.owner() as owner:
+            for tenant in db.tenants:
+                approval = await owner.get(Approval, tenant.approval.id)
+                budget = await owner.get(Budget, tenant.budget.id)
+                handled = tenant.agency_id in visited
+                assert approval.status == ("expired" if handled else "pending")
+                assert budget.reserved_micro == (0 if handled else 10)
+    assert set(visited) == {t.agency_id for t in db.tenants}

@@ -33,6 +33,26 @@ async def test_admin_roles_all_routes_tenant_scope_and_revocable_login(governed)
             )
             assert result.status_code == 200 and "no-store" in result.headers["cache-control"]
             credentials[role] = {"authorization": "Bearer " + result.json()["token"]}
+        users = (await admin.get("/admin/users", headers=master)).json()
+        reviewer = next(u["id"] for u in users if u["email"] == "approver@example.test")
+        group = (
+            await admin.post(
+                "/admin/reviewer-groups",
+                headers=master,
+                json={
+                    "name": "Review team",
+                    "client_id": str(governed.a.client.id),
+                    "user_ids": [reviewer],
+                },
+            )
+        ).json()
+        assert (
+            await admin.put(
+                "/admin/reviewer-groups/" + group["id"] + "/assignments",
+                headers=master,
+                json={"workflow_ids": [None]},
+            )
+        ).status_code == 200
         operator = credentials["operator"]
         viewer = credentials["viewer"]
         approver = credentials["approver"]

@@ -76,6 +76,26 @@ async def test_forwarded_review_link_requires_current_authorized_membership(gove
                     data={"token": token, "decision": "approve"},
                 )
             ).status_code == code
+        users = (await admin.get("/admin/users", headers=master)).json()
+        allowed_id = next(u["id"] for u in users if u["email"] == "allowed@review.test")
+        group = (
+            await admin.post(
+                "/admin/reviewer-groups",
+                headers=master,
+                json={
+                    "name": "Review team",
+                    "client_id": str(governed.a.client.id),
+                    "user_ids": [allowed_id],
+                },
+            )
+        ).json()
+        assert (
+            await admin.put(
+                "/admin/reviewer-groups/" + group["id"] + "/assignments",
+                headers=master,
+                json={"workflow_ids": [None]},
+            )
+        ).status_code == 200
         assert (await admin.get(link, headers=actors["allowed"])).status_code == 200
         assert (
             await admin.post(
@@ -159,10 +179,10 @@ async def test_new_agencies_do_not_use_legacy_global_notification_authority(gove
                 content=body,
                 headers={
                     "x-gas-timestamp": timestamp,
-                    "x-gas-signature": signature(timestamp, body),
+                    "x-gas-signature": signature(timestamp, body, b"w" * 32),
                 },
             )
-        ).status_code == 404
+        ).status_code == 410
         assert (
             await admin.post(
                 "/integrations/telegram",
@@ -175,7 +195,7 @@ async def test_new_agencies_do_not_use_legacy_global_notification_authority(gove
                     },
                 },
             )
-        ).status_code == 404
+        ).status_code == 403
     async with governed.factory() as session:
         record = await session.get(Approval, approval_id)
         assert record.status == "pending" and record.approver is None
