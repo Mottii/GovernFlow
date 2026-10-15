@@ -119,9 +119,11 @@ import secrets
 from pathlib import Path
 
 password = secrets.token_hex(24)
+app_password = secrets.token_urlsafe(32)
 values = {
     "POSTGRES_PASSWORD": password,
-    "DATABASE_URL": f"postgresql+asyncpg://gateway:{password}@localhost:55433/gateway",
+    "APP_DATABASE_PASSWORD": app_password,
+    "DATABASE_URL": f"postgresql+asyncpg://governflow_app:{app_password}@localhost:55433/gateway",
     "ADMIN_TOKEN": secrets.token_urlsafe(32),
     "MASTER_ENCRYPTION_KEY": base64.b64encode(secrets.token_bytes(32)).decode(),
     "DECISION_SIGNING_KEY": base64.b64encode(secrets.token_bytes(32)).decode(),
@@ -145,9 +147,6 @@ If `.env` already exists, retain its keys and configure missing settings locally
 
 ```bash
 docker compose build
-docker compose up -d postgres
-docker compose run --rm gateway alembic upgrade head
-docker compose run --rm gateway python -m core.pricing
 docker compose up -d
 uv run python scripts/bootstrap_admin.py
 ```
@@ -162,6 +161,10 @@ Open [the dashboard](http://localhost:3000) and sign in with `DASHBOARD_ADMIN_EM
 | Mock provider | <http://localhost:8002> | Deterministic development responses |
 | Postgres | `localhost:55433` | Persistent governance data |
 
+The `initialize` service migrates and seeds as the database owner, then provisions `governflow_app` with the restricted `governflow_runtime` grants. Gateway, admin API, and every worker use that application login. Runtime connections refuse owner, superuser, or bypass-RLS identities. Supply `APP_DATABASE_PASSWORD` when upgrading an existing `.env`; keep the existing owner and encryption secrets.
+
+Platform agency provisioning and catalog changes use the optional `maintenance` profile, bound to `127.0.0.1:8003`. Start it only for operator work (`docker compose --profile maintenance up -d maintenance`) and stop it afterward. `MAINTENANCE_MODE=true` is confined to initialization and that operator service. Ordinary admin API bootstrap access cannot mutate the shared catalog. See [agency administration](docs/agency-administration.md) for reviewer and destination setup.
+
 `docker compose down` stops the stack while retaining named volumes. Adding `--volumes` deletes the local database and replay queue. Migrations and catalog seeding must run before using a fresh database.
 
 ## Try the mock demo
@@ -171,7 +174,9 @@ Open [the dashboard](http://localhost:3000) and sign in with `DASHBOARD_ADMIN_EM
 With the stack running, execute from the repository root:
 
 ```bash
-E2E_SEED_FILE=.e2e.json uv run python scripts/seed_e2e.py
+docker compose --profile maintenance up -d maintenance
+E2E_ADMIN_URL=http://localhost:8003 E2E_SEED_FILE=.e2e.json uv run python scripts/seed_e2e.py
+docker compose stop maintenance
 ```
 
 This creates an isolated mock client, an R1 workflow, an operator account, a mock inference credential, and a `gpt-mock` price. The workflow has a **$1 monthly budget** and a **$0.01 per-run cap**. These are simulated ledger amounts; the mock provider incurs no inference charge.
@@ -395,7 +400,7 @@ Python wait time is in seconds; JavaScript wait time is in milliseconds. Both wr
 
 People can decide in the dashboard or through configured Telegram, SMTP review links, or signed webhooks. Notification delivery and expiry run through the `approval-notifier` worker. Telegram callbacks restrict approvers; webhook decisions validate signatures, timestamps, and replay identifiers. Approval content and decisions enter the audit chain.
 
-Follow [live credential setup](docs/live-setup.md) for Telegram. Configure SMTP or a webhook endpoint through the environment settings below. These external delivery paths have mock acceptance coverage and still require live verification.
+Follow [live credential setup](docs/live-setup.md) for Telegram. Configure transport settings below and explicitly assign reviewer groups and destinations through [agency administration](docs/agency-administration.md). These external delivery paths have mock acceptance coverage and still require live verification.
 
 ## Dashboard and roles
 
@@ -492,7 +497,8 @@ Start with [.env.example](.env.example). Keep real values in the ignored `.env` 
 | Setting | Purpose |
 | --- | --- |
 | `POSTGRES_PASSWORD` | Local Postgres password; also used by Compose's internal database URLs |
-| `DATABASE_URL` | Host-side async Postgres URL; Compose services use the internal `postgres` hostname |
+| `DATABASE_URL` | Restricted application login for host-side tools; Compose uses its internal `postgres` hostname |
+| `APP_DATABASE_PASSWORD` | URL-safe generated runtime password, at least 20 characters; separate from the migration owner |
 | `POSTGRES_HOST_PORT` | Optional Compose host port; defaults to `55433` |
 | `MASTER_ENCRYPTION_KEY` | Base64-encoded 32-byte key for encrypted credentials and approval content |
 | `DECISION_SIGNING_KEY` | Base64-encoded 32-byte action token signing key; gateway-side only for SDK use |
@@ -505,12 +511,12 @@ Start with [.env.example](.env.example). Keep real values in the ignored `.env` 
 | `REQUIRE_PROVIDER_MAPPING` | Mapping requirement for custom origins; official OpenAI/Anthropic hosts always require validated mappings |
 | `OPENAI_ADMIN_KEY`, `ANTHROPIC_ADMIN_KEY` | Organization reporting and account-validation credentials |
 | `DRIFT_COST_TOLERANCE_MICRO`, `DRIFT_TOKEN_TOLERANCE` | Drift tolerances; defaults are one micro-USD and zero tokens |
-| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_APPROVER_CHAT_IDS` | Telegram bot and comma-separated authorized private chat IDs |
+| `TELEGRAM_BOT_TOKEN` | Telegram delivery transport; recipients require user account linking and a scoped destination |
 | `TELEGRAM_WEBHOOK_SECRET`, `PUBLIC_ADMIN_URL` | Telegram callback authentication and reachable admin origin; live webhook setup needs HTTPS |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM` | Email delivery endpoint and sender; default port `587` |
 | `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_TLS_MODE` | SMTP authentication and TLS policy; default mode `starttls` |
-| `APPROVAL_EMAIL_TO` | Approval email recipient configuration |
-| `APPROVAL_WEBHOOK_URL`, `WEBHOOK_SIGNING_KEY` | Webhook delivery endpoint and shared signature key; the key must be base64-encoded 32 random bytes |
+| `TELEGRAM_APPROVER_CHAT_IDS`, `APPROVAL_EMAIL_TO`, `APPROVAL_WEBHOOK_URL` | Legacy values imported as encrypted, disabled destinations during upgrade; no routing authority |
+| Webhook destination credentials | Generated per destination by the admin API; the former global signing key is no longer used |
 | `REPLAY_QUEUE_PATH` | Durable SQLite replay queue path; Compose mounts the named `replay_queue` volume |
 | `E2E_SEED_FILE` | Private generated mock acceptance login file; use `.e2e.json` from the repository root |
 
@@ -523,8 +529,8 @@ Start with [.env.example](.env.example). Keep real values in the ignored `.env` 
 ```bash
 docker compose ps
 docker compose logs --tail=100 gateway admin-api
-docker compose exec gateway alembic current
-docker compose exec gateway python -m core.pricing
+docker compose run --rm initialize alembic current
+docker compose run --rm initialize python -m core.pricing
 ```
 
 Verify a client's audit chain after setting its non-secret ID:
@@ -588,7 +594,9 @@ Coverage includes the 200-call budget race, mixed reservation/settlement concurr
 With the mock services running, from the repository root:
 
 ```bash
-E2E_SEED_FILE=.e2e.json uv run python scripts/seed_e2e.py
+docker compose --profile maintenance up -d maintenance
+E2E_ADMIN_URL=http://localhost:8003 E2E_SEED_FILE=.e2e.json uv run python scripts/seed_e2e.py
+docker compose stop maintenance
 cd dashboard
 pnpm install --frozen-lockfile
 pnpm typecheck

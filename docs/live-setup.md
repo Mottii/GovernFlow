@@ -6,11 +6,11 @@ Live checks are pending because these credentials are not available yet. Keep al
 
 1. Use a Telegram account to open [@BotFather](https://t.me/BotFather), run `/newbot`, choose its name and username, and put the resulting token in `TELEGRAM_BOT_TOKEN`.
 2. Each approver opens the new bot in a **private chat** and sends `/start`.
-3. Run `uv run python scripts/telegram_setup.py chat-ids`. Add the printed IDs to comma-separated `TELEGRAM_APPROVER_CHAT_IDS`.
+3. Create an agency reviewer group, assign its client/workflows, and create an enabled Telegram destination for that group. Each reviewer calls `POST /admin/telegram/link` while signed in and sends the returned personal `/link ...` command to the bot in a private chat. See [agency administration](agency-administration.md).
 4. Generate a random `TELEGRAM_WEBHOOK_SECRET`, configure an HTTPS `PUBLIC_ADMIN_URL` that reaches the admin service through a reverse proxy, then run `uv run python scripts/telegram_setup.py set-webhook`.
 5. Restart the admin and notifier services to load the settings. Trigger an R2 action and approve it in Telegram.
 
-The bot uses private chats so the callback sender can be checked against the approved chat ID. The HTTP admin port is for local development. [Telegram BotFather guide](https://core.telegram.org/bots/features#botfather), [Telegram webhook API](https://core.telegram.org/bots/api#setwebhook).
+The bot uses private chats and linked user identities. Current membership, client access, reviewer assignment, and destination authorization are checked on each decision. The HTTP admin port is for local development. [Telegram BotFather guide](https://core.telegram.org/bots/features#botfather), [Telegram webhook API](https://core.telegram.org/bots/api#setwebhook).
 
 ## OpenAI
 

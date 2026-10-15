@@ -65,7 +65,7 @@ jobs:
       - run: uv run ruff check .
       - run: uv run mypy
       - run: uv run pytest
-      - run: docker compose config --quiet
+      - run: APP_DATABASE_PASSWORD=ci_compose_validation_only docker compose config --quiet
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -89,13 +89,13 @@ jobs:
           from pathlib import Path
           Path('.env').write_text('\n'.join([
               'POSTGRES_PASSWORD=' + secrets.token_urlsafe(24),
+              'APP_DATABASE_PASSWORD=' + secrets.token_urlsafe(32),
               'ADMIN_TOKEN=' + secrets.token_urlsafe(24),
               'MASTER_ENCRYPTION_KEY=' + base64.b64encode(secrets.token_bytes(32)).decode(),
               'DECISION_SIGNING_KEY=' + base64.b64encode(secrets.token_bytes(32)).decode(),
           ]) + '\n')
           PY
-          docker compose up -d --build postgres gateway admin-api mock-provider
-          docker compose exec -T gateway alembic upgrade head
+          docker compose --profile maintenance up -d --build postgres gateway admin-api maintenance mock-provider
           uv run python - <<'PY'
           import time, httpx
           for _ in range(30):
@@ -111,6 +111,7 @@ jobs:
       - run: uv run python scripts/seed_e2e.py
         env:
           E2E_SEED_FILE: ${{ github.workspace }}/.e2e.json
+          E2E_ADMIN_URL: http://localhost:8003
       - run: pnpm install --frozen-lockfile
         working-directory: dashboard
       - run: pnpm typecheck && pnpm build
