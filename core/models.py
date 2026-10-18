@@ -743,6 +743,130 @@ class AgencyPrice(Base):
     updated_by: Mapped[str] = mapped_column(Text)
 
 
+class ProviderCall(Base):
+    __tablename__ = "provider_calls"
+    __table_args__ = (
+        UniqueConstraint("agency_id", "id"),
+        UniqueConstraint("reservation_id"),
+        ForeignKeyConstraint(["agency_id", "client_id"], ["clients.agency_id", "clients.id"]),
+        ForeignKeyConstraint(
+            ["agency_id", "client_id", "workflow_id"],
+            ["workflows.agency_id", "workflows.client_id", "workflows.id"],
+        ),
+        ForeignKeyConstraint(
+            ["agency_id", "reservation_id", "budget_id", "run_id"],
+            [
+                "reservations.agency_id",
+                "reservations.id",
+                "reservations.budget_id",
+                "reservations.run_id",
+            ],
+        ),
+        ForeignKeyConstraint(
+            ["agency_id", "workflow_id", "budget_id"],
+            ["budgets.agency_id", "budgets.workflow_id", "budgets.id"],
+        ),
+        ForeignKeyConstraint(
+            ["agency_id", "workflow_id", "run_id"],
+            ["runs.agency_id", "runs.workflow_id", "runs.id"],
+        ),
+        CheckConstraint(
+            "state IN ('reserved','dispatched','settled_estimated','settled_measured','voided')"
+        ),
+        CheckConstraint("estimate_micro > 0 AND charged_micro >= 0 AND revision >= 0"),
+        Index("calls_lease_idx", "state", "lease_until"),
+        Index("calls_scope_created_idx", "agency_id", "client_id", "created_at", "id"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    agency_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("agencies.id"))
+    client_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    workflow_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    reservation_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    budget_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    period: Mapped[str] = mapped_column(Text)
+    provider: Mapped[str | None] = mapped_column(Text)
+    model: Mapped[str | None] = mapped_column(Text)
+    state: Mapped[str] = mapped_column(Text, default="reserved", server_default="reserved")
+    estimate_micro: Mapped[int] = mapped_column(BigInteger)
+    charged_micro: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    legacy_baseline_micro: Mapped[int | None] = mapped_column(BigInteger)
+    revision: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    price_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, server_default="{}")
+    usage: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    provider_request_id: Mapped[str | None] = mapped_column(Text)
+    provenance: Mapped[str] = mapped_column(Text, default="gateway", server_default="gateway")
+    uncertainty_reason: Mapped[str | None] = mapped_column(Text)
+    dispatch_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_until: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    lease_owner: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ChargeEntry(Base):
+    __tablename__ = "charge_entries"
+    __table_args__ = (
+        UniqueConstraint("agency_id", "evidence_id"),
+        UniqueConstraint("call_id", "revision"),
+        ForeignKeyConstraint(
+            ["agency_id", "call_id"], ["provider_calls.agency_id", "provider_calls.id"]
+        ),
+        CheckConstraint("amount_micro >= 0 AND revision > 0"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    agency_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    call_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    evidence_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    revision: Mapped[int] = mapped_column(Integer)
+    delta_micro: Mapped[int] = mapped_column(BigInteger)
+    amount_micro: Mapped[int] = mapped_column(BigInteger)
+    kind: Mapped[str] = mapped_column(Text)
+    evidence_ref: Mapped[str | None] = mapped_column(Text)
+    actor: Mapped[str] = mapped_column(Text)
+    reason: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AccountingReceipt(Base):
+    __tablename__ = "accounting_receipts"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["agency_id", "call_id"], ["provider_calls.agency_id", "provider_calls.id"]
+        ),
+    )
+    agency_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    evidence_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    call_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    checksum: Mapped[bytes] = mapped_column(LargeBinary)
+    disposition: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AccountingRecovery(Base):
+    __tablename__ = "accounting_recovery"
+    __table_args__ = (
+        ForeignKeyConstraint(["agency_id", "client_id"], ["clients.agency_id", "clients.id"]),
+        CheckConstraint("status IN ('pending','running','retry','quarantined','complete')"),
+        Index("accounting_recovery_due_idx", "status", "next_attempt"),
+    )
+    agency_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    evidence_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    client_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    call_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    checksum: Mapped[bytes] = mapped_column(LargeBinary)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(Text, default="pending", server_default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    next_attempt: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_owner: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 # Composite ownership constraints supplement the existing stable primary keys.
 from core.ownership import DERIVE_FUNCTION, PARENTS, SECONDARY, trigger_sql  # noqa: E402
 
@@ -807,3 +931,25 @@ event.listen(
 Base.metadata.tables["workflows"].append_constraint(
     UniqueConstraint("agency_id", "client_id", "id")
 )
+
+Base.metadata.tables["reservations"].append_constraint(
+    UniqueConstraint("agency_id", "id", "budget_id", "run_id")
+)
+
+from core.accounting_ddl import IMMUTABLE_FUNCTION  # noqa: E402
+
+event.listen(Base.metadata, "after_create", DDL(IMMUTABLE_FUNCTION))  # type: ignore[no-untyped-call]
+for _name in ("charge_entries", "accounting_receipts"):
+    event.listen(
+        Base.metadata,
+        "after_create",
+        DDL(  # type: ignore[no-untyped-call]
+            f"CREATE TRIGGER {_name}_immutable BEFORE UPDATE OR DELETE ON {_name} "
+            "FOR EACH ROW EXECUTE FUNCTION public.accounting_immutable()"
+        ),
+    )
+
+for _name in ("budgets", "runs"):
+    Base.metadata.tables[_name].append_constraint(
+        UniqueConstraint("agency_id", "workflow_id", "id")
+    )

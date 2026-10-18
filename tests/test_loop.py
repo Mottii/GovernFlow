@@ -10,10 +10,10 @@ from core.models import Alert, Budget, Event, KillFlag, Run, Workflow
 @pytest.mark.parametrize(
     "policy",
     [
-        {"per_run_micro": 45},
-        {"budget": {"per_run_micro": 45}},
-        {"per_run_micro": 45, "budget": {"per_run_micro": 1000}},
-        {"per_run_micro": 1000, "budget": {"per_run_micro": 45}},
+        {"per_run_micro": 75},
+        {"budget": {"per_run_micro": 75}},
+        {"per_run_micro": 75, "budget": {"per_run_micro": 1000}},
+        {"per_run_micro": 1000, "budget": {"per_run_micro": 75}},
     ],
 )
 async def test_configured_per_run_budget_blocks_before_forwarding(governed, policy):
@@ -42,7 +42,7 @@ async def test_configured_per_run_budget_blocks_before_forwarding(governed, poli
         run = (
             await session.execute(select(Run).where(Run.workflow_id == governed.a.workflow.id))
         ).scalar_one()
-        assert (run.cap_micro, run.cost_micro, run.reserved_micro) == (45, 30, 0)
+        assert (run.cap_micro, run.cost_micro, run.reserved_micro) == (75, 30, 0)
         budget = (
             await session.execute(
                 select(Budget).where(Budget.workflow_id == governed.a.workflow.id)

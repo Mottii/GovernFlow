@@ -20,7 +20,13 @@ def database_url() -> str:
 
 
 def make_engine(url: str | None = None) -> AsyncEngine:
-    result = create_async_engine(url or database_url(), pool_pre_ping=True)
+    result = create_async_engine(
+        url or database_url(),
+        pool_pre_ping=True,
+        pool_size=int(os.environ.get("DB_POOL_SIZE", "10")),
+        max_overflow=0,
+        pool_timeout=float(os.environ.get("DB_POOL_TIMEOUT_SECONDS", "5")),
+    )
 
     @event.listens_for(result.sync_engine, "connect")
     def restricted_login(connection: object, record: object) -> None:

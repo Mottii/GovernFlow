@@ -2,12 +2,13 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from fractions import Fraction
+from typing import Any, Literal
 
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from audit.chain import AuditEventInput, append_event
+from audit.chain import AuditEventInput
 from core.models import AgencyPrice, Budget, Price, Reservation, Run
 from core.usage import Usage
 from policy.loop import trip
@@ -18,7 +19,9 @@ def ceil_div(numerator: int, denominator: int) -> int:
 
 
 def estimate_micro(request_body: bytes, max_output: int, price: Price) -> int:
-    estimated_input = ceil_div(len(request_body), 3)
+    # Use the full UTF-8 body length as a conservative text estimate; never discount
+    # cached input until the provider supplies measured usage.
+    estimated_input = len(request_body)
     base_input = max(price.input, price.cache_write, price.cache_write_hour)
     return max(
         1,
@@ -105,8 +108,14 @@ async def reserve(
     est_micro: int,
     per_run_cap_micro: int,
     max_steps: int | None = None,
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+    pricing: dict[str, Any] | None = None,
 ) -> HeldReservation | None:
-    period = datetime.now(UTC).strftime("%Y-%m")
+    from policy.accounting import database_now
+
+    period = (await database_now(session)).strftime("%Y-%m")
     # Settlement takes the budget row before the run row. Reserve in that
     # order too, otherwise concurrent calls can deadlock with settlements.
     budget_id = (
@@ -156,11 +165,16 @@ async def reserve(
     ).scalar_one_or_none()
     if accepted_run is None:
         await session.rollback()
-        await trip(session, workflow_id, "loop_breaker", run_id=run_id)
+        persisted_run = await session.get(Run, run_id)
+        await trip(session, workflow_id, "loop_breaker", run_id=run_id if persisted_run else None)
         await session.commit()
         return None
     record = Reservation(budget_id=budget_id, run_id=run_id, est_micro=est_micro)
     session.add(record)
+    await session.flush()
+    from policy.accounting import register
+
+    await register(session, record, workflow_id, provider=provider, model=model, pricing=pricing)
     await session.commit()
     return HeldReservation(record.id, budget_id, run_id, est_micro)
 
@@ -171,74 +185,44 @@ async def settle(
     actual_micro: int,
     audit: AuditEventInput | None = None,
 ) -> bool:
-    record = (
-        await session.execute(
-            select(Reservation).where(Reservation.id == held.id).with_for_update()
-        )
-    ).scalar_one()
-    if record.status != "reserved":
-        await session.rollback()
-        return False
-    await session.execute(
-        update(Budget)
-        .where(Budget.id == record.budget_id)
-        .values(
-            reserved_micro=Budget.reserved_micro - record.est_micro,
-            spent_micro=Budget.spent_micro + actual_micro,
-        )
+    from policy.accounting import Evidence, apply, locked_call
+
+    call = await locked_call(session, held.id)
+    if audit:
+        call.provider, call.model = audit.provider or call.provider, audit.model or call.model
+    kind: Literal["estimate", "measured"] = "estimate" if audit and audit.estimated else "measured"
+    evidence = Evidence(
+        evidence_id=uuid.uuid5(held.id, f"{kind}:{actual_micro}"),
+        agency_id=call.agency_id,
+        client_id=call.client_id,
+        call_id=call.id,
+        kind=kind,
+        amount_micro=actual_micro,
+        reason="missing_usage" if kind == "estimate" else "terminal_usage",
+        usage=audit.usage if audit else None,
     )
-    await session.execute(
-        update(Run)
-        .where(Run.id == record.run_id)
-        .values(
-            reserved_micro=Run.reserved_micro - record.est_micro,
-            cost_micro=Run.cost_micro + actual_micro,
-        )
-    )
-    record.status = "settled"
-    record.actual_micro = actual_micro
-    record.settled_at = datetime.now(UTC)
-    if audit is not None:
-        await append_event(session, audit, record.run_id)
-    if actual_micro > record.est_micro:
-        workflow_id = (
-            await session.execute(select(Run.workflow_id).where(Run.id == record.run_id))
-        ).scalar_one()
-        await trip(
-            session,
-            workflow_id,
-            "budget_overrun",
-            run_id=record.run_id,
-            cost_micro=actual_micro - record.est_micro,
-        )
+    result = await apply(session, evidence)
     await session.commit()
-    return True
+    return result == "applied"
 
 
 async def release(
-    session: AsyncSession, held: HeldReservation, audit: AuditEventInput | None = None
+    session: AsyncSession,
+    held: HeldReservation,
+    audit: AuditEventInput | None = None,
 ) -> bool:
-    record = (
-        await session.execute(
-            select(Reservation).where(Reservation.id == held.id).with_for_update()
-        )
-    ).scalar_one()
-    if record.status != "reserved":
-        await session.rollback()
-        return False
-    await session.execute(
-        update(Budget)
-        .where(Budget.id == record.budget_id)
-        .values(reserved_micro=Budget.reserved_micro - record.est_micro)
+    from policy.accounting import Evidence, apply, locked_call
+
+    call = await locked_call(session, held.id)
+    evidence = Evidence(
+        evidence_id=uuid.uuid5(held.id, "void"),
+        agency_id=call.agency_id,
+        client_id=call.client_id,
+        call_id=call.id,
+        kind="void",
+        amount_micro=0,
+        reason=audit.type if audit else "not_dispatched",
     )
-    await session.execute(
-        update(Run)
-        .where(Run.id == record.run_id)
-        .values(reserved_micro=Run.reserved_micro - record.est_micro)
-    )
-    record.status = "released"
-    record.settled_at = datetime.now(UTC)
-    if audit is not None:
-        await append_event(session, audit, record.run_id)
+    result = await apply(session, evidence)
     await session.commit()
-    return True
+    return result == "applied"
