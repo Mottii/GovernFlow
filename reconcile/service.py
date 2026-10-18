@@ -7,7 +7,7 @@ from sqlalchemy import delete, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.models import Event, ProviderAccount, ReconcileJob, ReconcileSnapshot
+from core.models import ProviderAccount, ReconcileJob, ReconcileSnapshot
 from gateway.adapters.anthropic import message_usage
 from gateway.adapters.gemini import content_usage
 from gateway.adapters.openai import chat_usage
@@ -20,35 +20,28 @@ async def gateway_totals(
     session: AsyncSession, client_id: uuid.UUID, provider: str, day: date
 ) -> tuple[dict[str, dict[str, int]], int, int]:
     start = datetime.combine(day, time(), UTC)
-    events = (
-        (
-            await session.execute(
-                select(Event).where(
-                    Event.client_id == client_id,
-                    Event.provider == provider,
-                    Event.type == "provider_call",
-                    Event.ts >= start,
-                    Event.ts < start + timedelta(days=1),
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
+    from core.usage import Usage
+    from policy.projection import facts
+
+    events = await facts(session, [client_id], start, start + timedelta(days=1), provider=provider)
     models: dict[str, dict[str, int]] = {}
     cost = estimated = 0
+    usage: Usage | None
     for event in events:
-        cost += event.cost_micro or 0
-        estimated += int(event.estimated)
+        cost += event.cost_micro
+        estimated += event.estimated_calls
         if event.usage is None or event.model is None:
             continue
-        body = {"usage": event.usage}
-        if provider == "anthropic":
-            usage = message_usage(body)
-        elif provider == "gemini":
-            usage = content_usage({"usageMetadata": event.usage})
+        if not event.legacy:
+            usage = Usage(**event.usage)
         else:
-            usage = chat_usage(body) or responses_usage(body) or embeddings_usage(body)
+            body = {"usage": event.usage}
+            if provider == "anthropic":
+                usage = message_usage(body)
+            elif provider == "gemini":
+                usage = content_usage({"usageMetadata": event.usage})
+            else:
+                usage = chat_usage(body) or responses_usage(body) or embeddings_usage(body)
         if usage:
             add(
                 models,

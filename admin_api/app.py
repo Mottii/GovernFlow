@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
+from admin_api.accounting import router as accounting_router
 from admin_api.agencies import router as agencies_router
 from admin_api.auth import Actor, DbSession, client_scope, permit, platform_only, workflow_scope
 from admin_api.dashboard import router as dashboard_router
@@ -34,6 +35,7 @@ from gateway.errors import GatewayError, openai_error_handler
 
 app = FastAPI(title="Governed Automation Admin API")
 app.add_exception_handler(GatewayError, openai_error_handler)
+app.include_router(accounting_router)
 app.include_router(human_router)
 app.include_router(users_router)
 app.include_router(agencies_router)

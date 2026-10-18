@@ -12,7 +12,6 @@ from core.models import (
     Approval,
     Budget,
     Client,
-    Event,
     KillFlag,
     ProviderAccount,
     ReconcileJob,
@@ -80,7 +79,7 @@ async def spend(
         query = query.where(Workflow.client_id == scope)
     rows = (await session.execute(query)).all()
     groups: dict[str, Any] = {}
-    items = []
+    items: list[dict[str, Any]] = []
     for workflow, client, budget in rows:
         item = {
             "id": str(workflow.id),
@@ -110,27 +109,49 @@ async def spend(
         if start.month == 12
         else start.replace(month=start.month + 1)
     )
-    daily_date = func.date(func.timezone("UTC", Event.ts))
-    daily_query = select(
-        daily_date,
-        func.coalesce(func.sum(Event.cost_micro), 0),
-        func.count(),
-    ).where(
-        Event.type == "provider_call",
-        Event.ts >= start,
-        Event.ts < end,
-        Event.client_id.in_(permitted_clients(actor)),
+    from policy.projection import facts
+
+    records = await facts(
+        session, [uuid.UUID(identity) for identity in groups], start, end, period=period
     )
-    if scope:
-        daily_query = daily_query.where(Event.client_id == scope)
-    daily = (await session.execute(daily_query.group_by(daily_date).order_by(daily_date))).all()
+    daily_groups: dict[str, dict[str, int]] = {}
+    by_workflow = {item["id"]: item for item in items}
+    for item in items:
+        item["estimated_micro"], item["estimated_calls"] = 0, 0
+    for fact in records:
+        day = fact.at.astimezone(UTC).date().isoformat()
+        row = daily_groups.setdefault(day, {"cost_micro": 0, "calls": 0})
+        row["cost_micro"] += fact.cost_micro
+        row["calls"] += fact.calls
+        found = by_workflow.get(str(fact.workflow_id))
+        if found and fact.estimated_calls:
+            found["estimated_micro"] += fact.cost_micro
+            found["estimated_calls"] += fact.estimated_calls
+    from core.models import AccountingRecovery, ProviderCall
+
+    pending = (
+        await session.execute(
+            select(ProviderCall.workflow_id, func.count())
+            .join(AccountingRecovery, AccountingRecovery.call_id == ProviderCall.id)
+            .where(
+                ProviderCall.client_id.in_([uuid.UUID(identity) for identity in groups]),
+                ProviderCall.period == period,
+                AccountingRecovery.status != "complete",
+            )
+            .group_by(ProviderCall.workflow_id)
+        )
+    ).all()
+    for item in items:
+        item["recovery_pending"] = 0
+    for workflow_id, count in pending:
+        target = by_workflow.get(str(workflow_id))
+        if target:
+            target["recovery_pending"] = count
     return {
         "period": period,
         "clients": list(groups.values()),
         "workflows": items,
-        "daily": [
-            {"day": str(day), "cost_micro": cost, "calls": count} for day, cost, count in daily
-        ],
+        "daily": [{"day": day, **values} for day, values in sorted(daily_groups.items())],
     }
 
 

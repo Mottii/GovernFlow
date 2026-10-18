@@ -865,4 +865,140 @@ async def test_background_expiry_reaping_and_directory_keep_agency_context(
                 handled = tenant.agency_id in visited
                 assert approval.status == ("expired" if handled else "pending")
                 assert budget.reserved_micro == (0 if handled else 10)
+                assert budget.spent_micro == (10 if handled else 0)
     assert set(visited) == {t.agency_id for t in db.tenants}
+
+
+@pytest.mark.asyncio
+async def test_provider_accounting_corrections_and_recovery_obey_runtime_scopes(isolated_database):
+    from sqlalchemy.exc import DBAPIError
+
+    from core.models import AccountingReceipt, AccountingRecovery, ChargeEntry, ProviderCall
+    from policy.accounting import Evidence
+    from policy.journal import persist
+    from policy.replay import replay
+
+    db = isolated_database
+    async with db.owner() as session:
+        for i in (0, 2):
+            tenant = db.tenants[i]
+            user = User(
+                email=f"accounting-admin-{i}@fixture.test",
+                role="admin",
+                password_hash=b"fixture",
+                password_salt=b"fixture",
+            )
+            session.add(user)
+            await session.flush()
+            session.add(
+                AgencyMembership(
+                    agency_id=tenant.agency_id, user_id=user.id, role="admin", all_clients=True
+                )
+            )
+            await session.flush()
+            session.add(
+                AdminSession(
+                    agency_id=tenant.agency_id,
+                    user_id=user.id,
+                    token_hash=token_hash(f"accounting-admin-{i}"),
+                    expires_at=datetime.now(UTC) + timedelta(hours=1),
+                )
+            )
+        await session.commit()
+    async with (
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=gateway_app), base_url="http://gateway"
+        ) as gateway,
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=admin_app), base_url="http://admin"
+        ) as admin,
+    ):
+        ids = []
+        with respx.mock(assert_all_called=True) as mock:
+            mock.post("http://provider.test/v1/chat/completions").respond(
+                200, json={"usage": {"prompt_tokens": 12, "completion_tokens": 3}}
+            )
+            for tenant in db.tenants:
+                result = await gateway.post(
+                    "/v1/chat/completions",
+                    headers={"authorization": "Bearer " + tenant.key},
+                    json={"model": "gpt-mock", "max_tokens": 16},
+                )
+                assert result.status_code == 200, result.text
+                ids.append(uuid.UUID(result.headers["x-gateway-call-id"]))
+        for i, tenant in enumerate(db.tenants):
+            viewer = {"authorization": "Bearer session-" + tenant.client.name}
+            own = await admin.get(f"/admin/provider-calls/{ids[i]}", headers=viewer)
+            assert own.status_code == 200 and own.json()["charged_micro"] == 15
+            assert len((await admin.get("/admin/provider-calls", headers=viewer)).json()) == 1
+            foreign = ids[(i + 1) % 4]
+            assert (
+                await admin.get(f"/admin/provider-calls/{foreign}", headers=viewer)
+            ).status_code == 404
+            body = {
+                "evidence_id": str(uuid.uuid4()),
+                "expected_revision": 1,
+                "measured_micro": 17,
+                "reason": "Invoice adjustment",
+                "evidence_ref": "invoice:fixture",
+            }
+            assert (
+                await admin.post(
+                    f"/admin/provider-calls/{ids[i]}/corrections", headers=viewer, json=body
+                )
+            ).status_code == 403
+            operator = {"authorization": f"Bearer accounting-admin-{0 if i < 2 else 2}"}
+            result = await admin.post(
+                f"/admin/provider-calls/{ids[i]}/corrections", headers=operator, json=body
+            )
+            assert result.status_code == 200, result.text
+            other_agency = ids[2 if i < 2 else 0]
+            assert (
+                await admin.post(
+                    f"/admin/provider-calls/{other_agency}/corrections", headers=operator, json=body
+                )
+            ).status_code == 404
+            for format in ("json", "csv", "html"):
+                report = await admin.get(
+                    f"/admin/reports/{tenant.client.id}/{datetime.now(UTC):%Y-%m}",
+                    headers=viewer,
+                    params={"format": format},
+                )
+                assert report.status_code == 200, report.text
+                if format == "json":
+                    assert report.json()["totals"]["cost_micro"] == 17
+                    assert report.json()["totals"]["calls"] == 1
+            # A stale estimate is superseded by the stronger measured administrator result.
+            await persist(
+                Evidence(
+                    evidence_id=uuid.uuid4(),
+                    agency_id=tenant.agency_id,
+                    client_id=tenant.client.id,
+                    call_id=ids[i],
+                    kind="estimate",
+                    amount_micro=100,
+                    reason="expired_lease",
+                ).model_dump(mode="json")
+            )
+        async with db.runtime() as session:
+            assert await replay(session) == 4
+        for i in (0, 2):
+            async with db.runtime() as session:
+                for table in (ProviderCall, ChargeEntry, AccountingReceipt, AccountingRecovery):
+                    assert (
+                        await session.execute(select(func.count()).select_from(table))
+                    ).scalar_one() == 0
+                await set_agency_context(session, db.tenants[i].agency_id)
+                assert (
+                    await session.execute(select(func.count()).select_from(ProviderCall))
+                ).scalar_one() == 2
+                assert (
+                    await session.execute(select(func.count()).select_from(ChargeEntry))
+                ).scalar_one() == 4
+                assert (
+                    await session.execute(select(func.count()).select_from(AccountingRecovery))
+                ).scalar_one() == 2
+                assert await session.get(ProviderCall, ids[2 if i == 0 else 0]) is None
+                with pytest.raises(DBAPIError, match="permission denied"):
+                    await session.execute(text("DELETE FROM charge_entries"))
+                await session.rollback()

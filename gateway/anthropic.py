@@ -28,7 +28,7 @@ async def messages(
         raise GatewayError(400, "invalid_json", "Request body must be JSON") from exc
     if not isinstance(parsed, dict) or not isinstance(parsed.get("model"), str):
         raise GatewayError(400, "invalid_request", "A model is required")
-    maximum = parsed.get("max_tokens")
+    maximum = parsed.get("max_tokens", int(os.environ.get("DEFAULT_MAX_OUTPUT_TOKENS", "4096")))
     if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum <= 0:
         raise GatewayError(400, "invalid_max_tokens", "max_tokens must be positive")
 

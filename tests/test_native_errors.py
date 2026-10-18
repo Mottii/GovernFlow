@@ -88,7 +88,8 @@ async def test_error_matrix(governed):
             assert response.headers["retry-after"] == "17"
     async with governed.factory() as session:
         budgets = (await session.execute(select(Budget))).scalars().all()
-        assert all(b.spent_micro == 0 and b.reserved_micro == 0 for b in budgets)
+        assert all(b.reserved_micro == 0 for b in budgets)
+        assert sum(b.spent_micro for b in budgets) > 0  # Read timeouts may have been billed.
 
 
 @pytest.mark.asyncio

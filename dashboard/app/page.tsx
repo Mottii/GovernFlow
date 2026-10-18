@@ -39,6 +39,9 @@ type SpendRow = {
   name: string;
   risk_class: string;
   spent_micro: number;
+  estimated_micro: number;
+  estimated_calls: number;
+  recovery_pending: number;
   reserved_micro: number;
   cap_micro: number | null;
 };
@@ -114,6 +117,9 @@ type MonthlyReport = {
     cost_micro: number;
     calls: number;
     estimated_calls: number;
+    estimated_cost_micro: number;
+    corrected_calls: number;
+    recovery_pending: number;
     reserved_micro: number;
   };
   hours_saved: {
@@ -429,6 +435,8 @@ export default function Dashboard() {
               </td>
               <td className="numeric">
                 {money(w.spent_micro)}
+                {w.estimated_calls > 0 && <span className="muted"> · {money(w.estimated_micro)} estimated</span>}
+                {w.recovery_pending > 0 && <span className="muted"> · {w.recovery_pending} recovery pending</span>}
                 {w.reserved_micro > 0 && (
                   <span className="cell-sub">
                     {money(w.reserved_micro)} reserved
@@ -1188,9 +1196,9 @@ export default function Dashboard() {
                           </table>
                         </div>
                         <div className="panel-foot">
-                          Totals follow charges settled in this UTC month.{" "}
-                          {report.totals.estimated_calls} calls have estimated
-                          charges.
+                          Totals follow the original UTC accounting period, including later corrections.{" "}
+                          {report.totals.estimated_calls} calls ({money(report.totals.estimated_cost_micro)}) remain estimated.{" "}
+                          {report.totals.corrected_calls} calls were corrected; {report.totals.recovery_pending} recovery entries await processing.
                         </div>
                       </section>
                       <section className="panel space-top">

@@ -1,4 +1,5 @@
 import json
+import os
 from typing import Any
 
 from core.usage import Usage
@@ -45,10 +46,13 @@ class ChatStreamTracker:
     def __init__(self, suppress_injected_usage: bool) -> None:
         self.suppress_injected_usage = suppress_injected_usage
         self.buffer = bytearray()
-        self.usage: Usage | None = None
+        self._usage: Usage | None = None
+        self._complete = False
 
     def feed(self, chunk: bytes) -> list[bytes]:
         self.buffer.extend(chunk)
+        if len(self.buffer) > int(os.environ.get("MAX_TRACKER_BYTES", str(2 * 1024 * 1024))):
+            raise ValueError("Provider frame exceeds accounting buffer limit")
         ready: list[bytes] = []
         while True:
             lf = self.buffer.find(b"\n\n")
@@ -66,6 +70,8 @@ class ChatStreamTracker:
                 for line in frame.splitlines()
                 if line.startswith(b"data:")
             )
+            if payload == b"[DONE]":
+                self._complete = True
             usage_chunk = False
             if payload and payload != b"[DONE]":
                 try:
@@ -73,13 +79,21 @@ class ChatStreamTracker:
                     if isinstance(parsed, dict):
                         usage = chat_usage(parsed)
                         if usage is not None:
-                            self.usage = usage
+                            self._usage = usage
                             usage_chunk = parsed.get("choices") == []
                 except ValueError:
                     pass
             if not (self.suppress_injected_usage and usage_chunk):
                 ready.append(frame)
         return ready
+
+    @property
+    def usage(self) -> Usage | None:
+        return self._usage if self._complete else None
+
+    @property
+    def partial_usage(self) -> Usage | None:
+        return self._usage
 
     def flush(self) -> bytes:
         remaining = bytes(self.buffer)

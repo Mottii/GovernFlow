@@ -1,6 +1,7 @@
 """Usage extraction for the native Anthropic Messages dialect."""
 
 import json
+import os
 from typing import Any
 
 from core.usage import Usage
@@ -54,6 +55,8 @@ class MessageStreamTracker:
 
     def feed(self, chunk: bytes) -> None:
         self._buffer += chunk
+        if len(self._buffer) > int(os.environ.get("MAX_TRACKER_BYTES", str(2 * 1024 * 1024))):
+            raise ValueError("Provider frame exceeds accounting buffer limit")
         while True:
             lf, crlf = self._buffer.find(b"\n\n"), self._buffer.find(b"\r\n\r\n")
             if lf < 0 and crlf < 0:
@@ -84,6 +87,10 @@ class MessageStreamTracker:
                 self._complete = True
             elif event_type == "error":
                 self._errored = True
+
+    @property
+    def partial_usage(self) -> Usage | None:
+        return message_usage({"usage": self._usage})
 
     @property
     def usage(self) -> Usage | None:

@@ -40,9 +40,15 @@ def metadata_database_auth(monkeypatch):
     monkeypatch.setenv("ENFORCE_AGENCY_RLS", "false")
 
 
+@pytest_asyncio.fixture(autouse=True)
+async def gateway_runtime(metadata_database_auth, monkeypatch, tmp_path):
+    monkeypatch.setenv("REPLAY_QUEUE_PATH", str(tmp_path / "runtime.sqlite3"))
+    async with app.router.lifespan_context(app):
+        yield
+
+
 @pytest_asyncio.fixture
 async def governed(monkeypatch: pytest.MonkeyPatch, tmp_path):
-    monkeypatch.setenv("REPLAY_QUEUE_PATH", str(tmp_path / "replay.sqlite3"))
     from gateway.outage import _cache
 
     _cache.clear()
@@ -124,9 +130,11 @@ async def governed(monkeypatch: pytest.MonkeyPatch, tmp_path):
     admin_app.dependency_overrides[get_session] = test_session
     app.dependency_overrides[get_session] = test_session
     try:
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://gateway.test"
-        ) as http:
+        async with (
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://gateway.test"
+            ) as http,
+        ):
             yield SimpleNamespace(http=http, factory=factory, a=tenants[0], b=tenants[1])
     finally:
         app.dependency_overrides.clear()

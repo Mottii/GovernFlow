@@ -1,6 +1,7 @@
 """Usage extraction for OpenAI Responses and embeddings."""
 
 import json
+import os
 from typing import Any
 
 from core.usage import Usage
@@ -62,6 +63,8 @@ class ResponsesStreamTracker:
 
     def feed(self, chunk: bytes) -> None:
         self._buffer.extend(chunk)
+        if len(self._buffer) > int(os.environ.get("MAX_TRACKER_BYTES", str(2 * 1024 * 1024))):
+            raise ValueError("Provider frame exceeds accounting buffer limit")
         while True:
             lf = self._buffer.find(b"\n\n")
             crlf = self._buffer.find(b"\r\n\r\n")

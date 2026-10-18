@@ -27,10 +27,12 @@ from gateway.errors import (
 from gateway.gemini import router as gemini_router
 from gateway.native import proxy_native
 from gateway.openai_more import router as openai_more_router
+from gateway.runtime import LimitsMiddleware, lifespan
 from policy.kill import check_kill
 from policy.traffic import allowed_models
 
-app = FastAPI(title="Governed Automation Gateway")
+app = FastAPI(title="Governed Automation Gateway", lifespan=lifespan)
+app.add_middleware(LimitsMiddleware)
 app.add_exception_handler(GatewayError, openai_error_handler)
 app.add_exception_handler(DBAPIError, database_error_handler)
 app.add_exception_handler(RequestValidationError, validation_error_handler)

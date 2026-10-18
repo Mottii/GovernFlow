@@ -44,7 +44,8 @@ services:
         condition: service_completed_successfully
   gateway:
     build: .
-    command: uvicorn gateway.app:app --host 0.0.0.0 --port 8000
+    command: uvicorn gateway.app:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 30
+    stop_grace_period: 45s
     environment:
       DATABASE_URL: postgresql+asyncpg://governflow_app:${APP_DATABASE_PASSWORD:?Set APP_DATABASE_PASSWORD to a URL-safe secret of at least 20 characters}@postgres:5432/gateway
       MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY:-}
@@ -52,6 +53,25 @@ services:
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-http://mock-provider:8002}
       ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-http://mock-provider:8002}
       GEMINI_BASE_URL: ${GEMINI_BASE_URL:-http://mock-provider:8002}
+      DEPLOYMENT_MODE: ${DEPLOYMENT_MODE:-self_hosted}
+      RECOVERY_BACKEND: ${RECOVERY_BACKEND:-sqlite}
+      RECOVERY_S3_BUCKET: ${RECOVERY_S3_BUCKET:-}
+      RECOVERY_S3_PREFIX: ${RECOVERY_S3_PREFIX:-governflow-recovery}
+      RECOVERY_S3_ENDPOINT: ${RECOVERY_S3_ENDPOINT:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      ALLOW_FAIL_OPEN: ${ALLOW_FAIL_OPEN:-false}
+      SELF_HOSTED_SINGLE_NODE: ${SELF_HOSTED_SINGLE_NODE:-false}
+      DEFAULT_MAX_OUTPUT_TOKENS: ${DEFAULT_MAX_OUTPUT_TOKENS:-4096}
+      MAX_OUTPUT_TOKENS: ${MAX_OUTPUT_TOKENS:-32768}
+      MAX_REQUEST_BYTES: ${MAX_REQUEST_BYTES:-2097152}
+      MAX_RESPONSE_BYTES: ${MAX_RESPONSE_BYTES:-16777216}
+      MAX_TRACKER_BYTES: ${MAX_TRACKER_BYTES:-2097152}
+      GATEWAY_MAX_INFLIGHT: ${GATEWAY_MAX_INFLIGHT:-128}
+      WORKFLOW_MAX_INFLIGHT: ${WORKFLOW_MAX_INFLIGHT:-32}
+      CALL_DEADLINE_SECONDS: ${CALL_DEADLINE_SECONDS:-300}
+      CALL_LEASE_SECONDS: ${CALL_LEASE_SECONDS:-60}
+      CALL_RENEW_SECONDS: ${CALL_RENEW_SECONDS:-15}
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
       REPLAY_QUEUE_PATH: /queue/replay.sqlite3
       UPSTREAM_TIMEOUT_S: ${UPSTREAM_TIMEOUT_S:-120}
       REQUIRE_PROVIDER_MAPPING: ${REQUIRE_PROVIDER_MAPPING:-false}
@@ -82,9 +102,15 @@ services:
         condition: service_completed_successfully
   reservation-reaper:
     build: .
-    command: sh -c "while true; do python -m policy.reap; python -m policy.replay; python -m admin_api.cleanup; sleep 60; done"
+    command: sh -c "while true; do python -m policy.reap; python -m policy.replay; python -m admin_api.cleanup; sleep 15; done"
     environment:
       DATABASE_URL: postgresql+asyncpg://governflow_app:${APP_DATABASE_PASSWORD:?Set APP_DATABASE_PASSWORD to a URL-safe secret of at least 20 characters}@postgres:5432/gateway
+      DEPLOYMENT_MODE: ${DEPLOYMENT_MODE:-self_hosted}
+      RECOVERY_BACKEND: ${RECOVERY_BACKEND:-sqlite}
+      RECOVERY_S3_BUCKET: ${RECOVERY_S3_BUCKET:-}
+      RECOVERY_S3_PREFIX: ${RECOVERY_S3_PREFIX:-governflow-recovery}
+      RECOVERY_S3_ENDPOINT: ${RECOVERY_S3_ENDPOINT:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
       REPLAY_QUEUE_PATH: /queue/replay.sqlite3
     volumes:
       - replay_queue:/queue

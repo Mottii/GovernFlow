@@ -69,7 +69,7 @@ async def test_chat_proxy_preserves_body_and_uses_provider_credential(
         )
         session.add(
             Budget(
-                workflow_id=workflow.id, period=datetime.now(UTC).strftime("%Y-%m"), cap_micro=50
+                workflow_id=workflow.id, period=datetime.now(UTC).strftime("%Y-%m"), cap_micro=110
             )
         )
         session.add(
@@ -196,7 +196,10 @@ async def test_chat_proxy_preserves_body_and_uses_provider_credential(
             assert models_response.json()["data"][0]["id"] == "gpt-mock"
             assert killed.status_code == 503
             assert killed.json()["error"]["code"] == "workflow_killed"
-            assert route.calls[0].request.content == request_bytes
+            assert json.loads(route.calls[0].request.content) == {
+                **json.loads(request_bytes),
+                "max_completion_tokens": 16,
+            }
             assert route.calls[0].request.headers["Authorization"] == "Bearer real-provider-key"
             assert response.status_code == 200
             assert response.content == response_bytes
