@@ -316,13 +316,13 @@ This live-model example requires a configured provider credential and model pric
 - **Concurrency:** Postgres locks coordinate reservations across replicas so concurrent calls cannot reserve the same remaining balance.
 - **Overruns:** If actual cost exceeds a reservation, the full charge is recorded, `budget_overrun` is emitted, and subsequent calls stop. A pre-call estimate cannot guarantee that final provider charges never exceed a cap.
 
-Set native output-token limits explicitly. Missing terminal stream usage, including an interrupted OpenAI stream, settles an explicitly marked estimate. Estimates remain visible in audit events and reports.
+Native output-token limits are enforced before reservation and forwarding. Missing limits receive the configured default; explicit valid limits are preserved. Missing terminal stream usage, including an interrupted OpenAI stream, settles an explicitly marked estimate. Later measured evidence adjusts the same call through an append-only ledger. Estimates and corrections remain visible in reports. See [provider accounting and recovery](docs/phase2-accounting.md).
 
 ### Outage behavior
 
-Workflows fail closed by default. Only an administrator may enable `outage.mode = "open"`, and only for R0/R1 workflows.
+Workflows fail closed by default. Hosted mode always fails closed. Single-node self-hosting with persistent SQLite may explicitly set both `ALLOW_FAIL_OPEN=true` and `SELF_HOSTED_SINGLE_NODE=true`; an administrator must also enable `outage.mode = "open"` on an R0/R1 workflow.
 
-A replica can admit such a call during a storage outage only if it has a recent eligible snapshot from a successful governed call. Snapshots expire after 60 seconds. The call is written to a durable replay queue before forwarding, receives `x-gateway-estimated: true`, and is replayed into accounting when storage returns. Unknown workflows, expired snapshots, R2/R3 workflows, or an unavailable replay queue fail closed.
+A node can admit such a call during a database outage only if it has a recent eligible snapshot from a successful governed call in the same run and UTC budget month. Snapshots expire after 60 seconds. Estimated dispatch intent is written to the durable journal before forwarding. Complete terminal usage adds measured evidence; otherwise the estimate remains. Responses include `x-gateway-outage: fail-open` and identify estimated usage through `x-gateway-estimated`. Unknown workflows, expired snapshots, R2/R3 workflows, or unavailable recovery storage fail closed.
 
 During a database outage, replicas cannot coordinate a global remaining budget or receive fresh kill state. Enable this exception only when that limitation is acceptable, and persist the replay volume. See [the outage and schema decisions](docs/decisions.md).
 
@@ -518,9 +518,17 @@ Start with [.env.example](.env.example). Keep real values in the ignored `.env` 
 | `TELEGRAM_APPROVER_CHAT_IDS`, `APPROVAL_EMAIL_TO`, `APPROVAL_WEBHOOK_URL` | Legacy values imported as encrypted, disabled destinations during upgrade; no routing authority |
 | Webhook destination credentials | Generated per destination by the admin API; the former global signing key is no longer used |
 | `REPLAY_QUEUE_PATH` | Durable SQLite replay queue path; Compose mounts the named `replay_queue` volume |
+| `DEPLOYMENT_MODE`, `RECOVERY_BACKEND` | `self_hosted` with persistent `sqlite`, or `hosted` with `s3` |
+| `RECOVERY_S3_BUCKET`, `RECOVERY_S3_PREFIX` | Hosted accounting journal bucket and application prefix; use task-role credentials |
+| `ALLOW_FAIL_OPEN`, `SELF_HOSTED_SINGLE_NODE` | Both default false; explicit single-node opt-in in addition to workflow policy |
+| `DEFAULT_MAX_OUTPUT_TOKENS`, `MAX_OUTPUT_TOKENS` | Injected default `4096`, server ceiling `32768`; workflow `max_output_tokens` may lower the ceiling |
+| `MAX_REQUEST_BYTES`, `MAX_RESPONSE_BYTES`, `MAX_TRACKER_BYTES` | Request `2 MiB`, buffered response `16 MiB`, usage tracker `2 MiB` |
+| `GATEWAY_MAX_INFLIGHT`, `WORKFLOW_MAX_INFLIGHT` | Per-process concurrent governed calls: `128` and `32`; excess calls receive 429 |
+| `CALL_DEADLINE_SECONDS`, `CALL_LEASE_SECONDS`, `CALL_RENEW_SECONDS` | Total call deadline `300`, dispatch lease `60`, heartbeat `15` seconds |
+| `DB_POOL_SIZE` | Per-process Postgres pool size `10`, without overflow |
 | `E2E_SEED_FILE` | Private generated mock acceptance login file; use `.e2e.json` from the repository root |
 
-`DEFAULT_FAIL_MODE` in the template does not override workflow policy: fail open requires an explicit administrator-approved policy. The Chat handler reads `DEFAULT_MAX_OUTPUT_TOKENS` as a reservation-estimate fallback, defaulting to 4096; Compose does not currently pass that variable through. Send the provider's native output-limit field explicitly. An estimate is not an injected provider output cap.
+`DEFAULT_FAIL_MODE` does not override workflow policy. Output limits are injected using each provider's native field before accounting and transmission. See the [recovery runbook](docs/phase2-accounting.md) for S3 permissions, inspection APIs, corrections, and maintenance-window upgrades.
 
 ## Operations and deployment
 
@@ -542,11 +550,11 @@ docker compose exec gateway python -m audit.verify --client "$GOVERNFLOW_CLIENT_
 
 | Worker | Schedule in Compose | Responsibility |
 | --- | --- | --- |
-| `reservation-reaper` | Every 60 seconds | Release stale reservations, replay queued accounting, clean expired sessions/rate buckets |
+| `reservation-reaper` | Every 15 seconds | Recover expired leases, replay accounting evidence, clean expired sessions/rate buckets |
 | `approval-notifier` | Every 30 seconds | Expire approvals and deliver queued notifications |
 | `reconciler` | Every 24 hours | Refresh three prior UTC days and detect drift |
 
-Stale pending reservations older than one hour are released by maintenance. Keep workers running and monitor their errors. Use the global, client, and workflow kill controls when intervention is needed.
+Expired undispatched calls are voided. Expired dispatched calls settle conservatively as estimates; uncertainty never silently releases a possible provider charge. Recovery retries accounting only and never resends a provider request. Keep workers running and inspect failed or quarantined evidence. Upgrade through the [maintenance procedure](docs/phase2-accounting.md#maintenance-window-upgrade).
 
 ### Deploying beyond localhost
 
@@ -588,6 +596,8 @@ docker compose config --quiet
 For full integration coverage, set **both** `TEST_DATABASE_URL` and `APP_TEST_DATABASE_URL` to separate, disposable Postgres 16 databases. The migration test upgrades and downgrades its database; application fixtures recreate tables in theirs. Never point these variables at your development or production data. When they are absent, database tests are skipped, so a partial local pass is not full acceptance.
 
 Coverage includes the 200-call budget race, mixed reservation/settlement concurrency, per-run caps, tenant isolation, native error shapes, official OpenAI/Anthropic SDK contracts, stream interruption, outages, approval replay, expiry, audit-chain tampering, provider drift, and report exports. Fixtures are deterministic mocks following provider formats, not live captures.
+
+Full recovery acceptance also sets `S3_TEST_ENDPOINT` to a disposable local S3 emulator. CI starts Moto 5.2.4 at `http://127.0.0.1:59000`. S3 tests use synthetic credentials and refuse nonlocal endpoints. `scripts/benchmark_gateway.py` measures a bounded localhost mock workload; it requires the isolated stack's `ADMIN_TOKEN` and does not accept remote endpoints.
 
 ### Dashboard
 
@@ -636,7 +646,7 @@ Record results in [acceptance evidence](docs/phase-exits.md). Sanitize live capt
 | Approval token is rejected | Check action equality, workflow, expiry, and whether it was already consumed |
 | Official provider forwarding fails | Validate the dedicated account mapping and associated inference key |
 | Reconciliation shows unknown or failed | Configure organization reporting credentials and inspect the job outcome; allow for reporting delay |
-| Budget reservations remain pending | Check the maintenance worker and provider timeouts; stale reservations are reaped after one hour |
+| Budget reservations remain pending | Check dispatch leases and the recovery worker; expired dispatched calls become estimated charges |
 
 Avoid including secrets, approval payloads, or database dumps in public debugging reports. Share redacted error codes and reproduction steps.
 

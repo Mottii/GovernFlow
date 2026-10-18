@@ -12,7 +12,9 @@ from dotenv import dotenv_values
 
 
 async def main() -> None:
-    env = {**dotenv_values(".env"), **os.environ}
+    env = dict(os.environ)
+    if not env.get("ADMIN_TOKEN"):
+        env = {**dotenv_values(".env"), **env}
     async with httpx.AsyncClient(
         base_url=env.get("E2E_ADMIN_URL", "http://localhost:8001"),
         headers={"authorization": "Bearer " + str(env["ADMIN_TOKEN"])},

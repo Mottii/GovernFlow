@@ -42,7 +42,26 @@ Agency creation and initial membership provisioning remain operator operations. 
 
 ## Next work
 
-Phase 2 begins with the explicit provider-call lifecycle, dispatch intent, uncertain-charge accounting, correction ledger, replay durability, and bounded proxy concurrency. Phases 2–8 remain pending under the agency release brief. The earlier short-transaction pool fix is a supporting change, not completion of Phase 2.
+Phase 3 adds shared client budgets, recurring UTC budgets, scoped run stops, versioned policies, and credential/key rotation. Phases 3–8 remain pending under the agency release brief. AWS deployment, Cognito, live external transport/provider verification, and hosted pilot acceptance remain later gates.
+
+## Phase 2 complete — 2026-10-18
+
+Provider calls now have durable dispatch intent, explicit lifecycle states, leases, price snapshots, and measured/estimated provenance. Migration `0019` adds canonical calls, append-only charge adjustments and evidence receipts, and leased recovery jobs under agency RLS. Live settlement, expiry, legacy replay, and administrator corrections use one transactional accounting path. Unknown post-dispatch outcomes become conservative estimates, while later measured evidence adjusts the original call and UTC budget period exactly once. Workers never repeat inference.
+
+Persistent SQLite supports self-hosting; hosted mode requires an S3 journal and always fails closed. Conditional journal creation, checksum-bound receipts, and acknowledgement after commit preserve evidence through duplicate replay and lost acknowledgements. Failed evidence remains retryable or quarantined. Explicit fail open is limited to administrator-enabled R0/R1 workflows in a single-node SQLite deployment. If terminal journal writes fail, intake blocks while evidence retries; a hard loss during simultaneous database/journal failure retains the dispatch estimate but can lose the in-memory measurement.
+
+The proxy reuses application-lifetime HTTP clients, enforces provider-native output limits, bounds requests/responses/parser buffers and concurrency, renews dispatch leases, and shields cancellation finalization. Provider waits hold no database transaction. Scoped call/recovery inspection, explicit retries, and revision-checked evidence-backed administrator corrections are available through the admin API. Reports and existing dashboard views show estimates, corrections, and imported recovery backlog without double-counting charges.
+
+### Acceptance evidence
+
+- **92 backend tests passed** against two disposable Postgres 16 databases and a Moto 5.2.4 S3 emulator. Coverage includes the existing 200-call reservation race, mixed reserve/settle/reap/measurement/cap changes, both reaper/replay orders, late measurements, UTC original-month corrections, duplicate/conflicting evidence, ten concurrent recovery workers, lost acknowledgements, corrupt S3 retention, persistent journal replacement, legacy upgrade, cancellation, and temporary terminal-storage failure without repeated inference.
+- **100 simultaneous slow streams** complete with a database pool of five connections. The test confirms zero checked-out database connections while all streams wait for provider data, then verifies measured accounting.
+- Populated `0018` → `0019` upgrade preserves pre-existing balances and historical audit payloads. Legacy pending dispatches recover conservatively; late usage adjusts their original month. Downgrade after accounting activity is refused. Restricted-role tests verify agency/client isolation, scoped corrections/recovery, parent constraints, and append-only ledger/receipts.
+- Ruff, strict backend/Python SDK mypy, JavaScript SDK tests, dashboard TypeScript checks and production build, Compose configuration/build/initialization, and redacted source/history secret scans pass.
+- **Two Playwright tests passed** against the isolated Compose stack: authenticated workflow/key/native call/spend/stop/mobile/sign-out flow and cross-origin mutation rejection. Provider and transport fixtures are deterministic mocks.
+- Final local mock benchmark: **200 requests at 20 rps**, direct-provider p95 **3.341 ms**, gateway p95 **31.634 ms**, paired added-latency p50 **16.904 ms** and p95 **30.427 ms**, below the **100 ms** target. Environment: macOS 26.6.2 arm64 client, Docker aarch64 with 10 CPUs and 7.75 GiB memory, Postgres 16, default gateway concurrency 128 and pool 10. Gateway memory after the run was approximately 79 MiB. This is a development benchmark, not a hosted capacity claim.
+
+See [provider accounting and recovery](phase2-accounting.md) for the implementation sequence, APIs, defaults, S3 permissions, durability boundaries, and maintenance-window upgrade/rollback procedure. S3 emulator acceptance does not establish actual AWS IAM, bucket-policy, or task-replacement correctness; those require hosted acceptance in Phase 7. Live provider charges and external notification delivery remain Phase 8.
 
 ## Prior milestones
 
