@@ -13,9 +13,11 @@ from core.models import (
     AccountingRecovery,
     Budget,
     ChargeEntry,
+    ClientBudget,
     ProviderCall,
     Reservation,
     Run,
+    Workflow,
 )
 from policy.accounting import Evidence, EvidenceConflict, apply, mark_dispatched
 from policy.budget import reserve
@@ -246,6 +248,16 @@ async def test_corrections_restate_original_month_without_changing_call_count(go
         await session.execute(
             update(Budget).where(Budget.id == held.budget_id).values(period=previous)
         )
+        from core.models import ClientBudget
+
+        call = await session.get(ProviderCall, held.id)
+        call.client_budget_id = None
+        await session.flush()
+        await session.execute(
+            update(ClientBudget)
+            .where(ClientBudget.client_id == governed.a.client.id)
+            .values(period=previous)
+        )
         await session.execute(
             update(ProviderCall)
             .where(ProviderCall.id == held.id)
@@ -295,16 +307,45 @@ async def test_mixed_reserve_settle_correct_reap_and_cap_change_do_not_deadlock(
 
     held, evidence = await pending_call(governed)
     async with governed.factory() as session:
+        sibling = Workflow(client_id=governed.a.client.id, name="Shared client", risk_class="R1")
+        session.add(sibling)
+        await session.flush()
+        session.add(
+            Budget(workflow_id=sibling.id, period=f"{datetime.now(UTC):%Y-%m}", cap_micro=1000)
+        )
         await session.execute(
             update(ProviderCall)
             .where(ProviderCall.id == held.id)
             .values(lease_until=datetime.now(UTC) - timedelta(seconds=1))
         )
         await session.commit()
+        sibling_id = sibling.id
+    cap_url = f"/admin/clients/{governed.a.client.id}/budget"
+    cap_body = {
+        "period": f"{datetime.now(UTC):%Y-%m}",
+        "cap_micro": 400,
+        "expected_revision": 1,
+        "reason": "Shared race allowance",
+    }
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=admin_app), base_url="http://admin"
+    ) as admin:
+        response = await admin.put(
+            cap_url, headers={"authorization": "Bearer test-admin"}, json=cap_body
+        )
+        assert response.status_code == 200, response.text
+    # Duplicate recovery competes with live measurement and stale-call reaping.
+    await persist(evidence.model_dump(mode="json"))
 
     async def ordinary(index):
         async with governed.factory() as session:
-            reservation = await reserve(session, governed.a.workflow.id, f"mixed:{index}", 1, 1000)
+            reservation = await reserve(
+                session,
+                sibling_id if index % 2 else governed.a.workflow.id,
+                f"mixed:{index}",
+                1,
+                1000,
+            )
             assert reservation is not None
             await settle(session, reservation, 1)
 
@@ -318,15 +359,38 @@ async def test_mixed_reserve_settle_correct_reap_and_cap_change_do_not_deadlock(
             await reap_stale(session, datetime.now(UTC))
 
     async def cap_change():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=admin_app), base_url="http://admin"
+        ) as admin:
+            response = await admin.put(
+                cap_url,
+                headers={"authorization": "Bearer test-admin"},
+                json={**cap_body, "cap_micro": 300, "expected_revision": 2},
+            )
+            assert response.status_code == 200, response.text
         async with governed.factory() as session:
             await session.execute(
                 update(Budget).where(Budget.id == held.budget_id).values(cap_micro=200)
             )
             await session.commit()
 
+    async def recovery():
+        async with governed.factory() as session:
+            await replay(session)
+
     async with asyncio.timeout(20):
-        await asyncio.gather(measured(), reaper(), cap_change(), *(ordinary(i) for i in range(50)))
+        await asyncio.gather(
+            measured(), reaper(), cap_change(), recovery(), *(ordinary(i) for i in range(200))
+        )
     async with governed.factory() as session:
         budget = await session.get(Budget, held.budget_id)
-        assert (budget.spent_micro, budget.reserved_micro) == (65, 0)
-        assert (await session.execute(select(func.sum(ChargeEntry.delta_micro)))).scalar_one() == 65
+        assert (budget.spent_micro, budget.reserved_micro) == (115, 0)
+        shared = (
+            await session.execute(
+                select(ClientBudget).where(ClientBudget.client_id == governed.a.client.id)
+            )
+        ).scalar_one()
+        assert (shared.spent_micro, shared.reserved_micro, shared.cap_micro) == (215, 0, 300)
+        assert (
+            await session.execute(select(func.sum(ChargeEntry.delta_micro)))
+        ).scalar_one() == 215

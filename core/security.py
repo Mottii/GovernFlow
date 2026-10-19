@@ -1,4 +1,3 @@
-import base64
 import hashlib
 import os
 import secrets
@@ -16,14 +15,9 @@ def virtual_key_hash(key: str) -> bytes:
 
 
 def master_key() -> bytes:
-    encoded = os.environ.get("MASTER_ENCRYPTION_KEY", "")
-    try:
-        value = base64.b64decode(encoded, validate=True)
-    except ValueError as exc:
-        raise RuntimeError("MASTER_ENCRYPTION_KEY must be base64") from exc
-    if len(value) != 32:
-        raise RuntimeError("MASTER_ENCRYPTION_KEY must decode to 32 bytes")
-    return value
+    from core.keyrings import active_id, key
+
+    return key("encryption", active_id("encryption"))
 
 
 def credential_aad(client_id: uuid.UUID, provider: str, label: str) -> bytes:
@@ -31,19 +25,32 @@ def credential_aad(client_id: uuid.UUID, provider: str, label: str) -> bytes:
 
 
 def encrypt_provider_key(
-    plaintext: str, client_id: uuid.UUID, provider: str, label: str
+    plaintext: str, client_id: uuid.UUID, provider: str, label: str, *, key_id: str | None = None
 ) -> tuple[bytes, bytes]:
+    from core.keyrings import active_id, key
+
+    identity = key_id or active_id("encryption")
     nonce = os.urandom(12)
-    ciphertext = AESGCM(master_key()).encrypt(
-        nonce, plaintext.encode(), credential_aad(client_id, provider, label)
-    )
+    aad = credential_aad(client_id, provider, label)
+    if identity != "0000":
+        aad = b"v2:" + identity.encode() + b":" + aad
+    ciphertext = AESGCM(key("encryption", identity)).encrypt(nonce, plaintext.encode(), aad)
     return ciphertext, nonce
 
 
 def decrypt_provider_key(
-    ciphertext: bytes, nonce: bytes, client_id: uuid.UUID, provider: str, label: str
+    ciphertext: bytes,
+    nonce: bytes,
+    client_id: uuid.UUID,
+    provider: str,
+    label: str,
+    *,
+    key_id: str | None = None,
 ) -> str:
-    plaintext = AESGCM(master_key()).decrypt(
-        nonce, ciphertext, credential_aad(client_id, provider, label)
-    )
+    from core.keyrings import key
+
+    aad = credential_aad(client_id, provider, label)
+    if key_id and key_id != "0000":
+        aad = b"v2:" + key_id.encode() + b":" + aad
+    plaintext = AESGCM(key("encryption", key_id)).decrypt(nonce, ciphertext, aad)
     return plaintext.decode()

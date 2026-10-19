@@ -11,6 +11,7 @@ from sqlalchemy import delete, select, text
 from sqlalchemy.exc import IntegrityError
 
 from admin_api.auth import Actor, DbSession, client_scope, permit, workflow_scope
+from audit.administration import record as audit_record
 from core.models import (
     AgencyMembership,
     ExternalLoginIdentity,
@@ -112,6 +113,15 @@ async def save_group(
             for u in set(body.user_ids)
         ]
     )
+    await audit_record(
+        session,
+        actor.agency_id,
+        actor.email,
+        "integration",
+        group.id,
+        "group_changed",
+        active=body.active,
+    )
     await session.commit()
     return {"id": str(group.id), **body.model_dump(mode="json")}
 
@@ -206,6 +216,15 @@ async def assignments(
             for w in set(body.workflow_ids)
         ]
     )
+    await audit_record(
+        session,
+        actor.agency_id,
+        actor.email,
+        "integration",
+        group_id,
+        "assignments_changed",
+        workflow_ids=[str(w) for w in body.workflow_ids if w],
+    )
     await session.commit()
     return {"saved": True}
 
@@ -265,10 +284,23 @@ async def save_destination(
     if body.channel == "webhook" and record.credential_hash is None:
         credential = secrets.token_urlsafe(32)
         record.credential_hash = hashlib.sha256(credential.encode()).digest()
+        from core.keyrings import active_id
+
+        record.encryption_key_id = active_id("encryption")
         record.secret_ciphertext, record.secret_nonce = encrypt_provider_key(
             credential, actor.agency_id, "integration", str(record.id)
         )
     session.add(record)
+    await audit_record(
+        session,
+        actor.agency_id,
+        actor.email,
+        "integration",
+        record.id,
+        "destination_changed",
+        enabled=body.enabled,
+        changed_fields=["configuration", "assignment"],
+    )
     await session.commit()
     result = destination_view(record)
     if credential:
@@ -366,5 +398,8 @@ async def unlink_telegram(session: DbSession, actor: Actor) -> None:
             ExternalLoginIdentity.issuer == "telegram",
             ExternalLoginIdentity.user_id == actor.user_id,
         )
+    )
+    await audit_record(
+        session, actor.agency_id, actor.email, "integration", actor.user_id, "identity_unlinked"
     )
     await session.commit()

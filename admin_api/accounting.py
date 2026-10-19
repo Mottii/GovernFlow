@@ -19,6 +19,11 @@ def view(call: ProviderCall) -> dict[str, Any]:
         "id": str(call.id),
         "client_id": str(call.client_id),
         "workflow_id": str(call.workflow_id),
+        "client_budget_id": str(call.client_budget_id) if call.client_budget_id else None,
+        "policy_version": call.policy_version,
+        "credential_version_id": str(call.credential_version_id)
+        if call.credential_version_id
+        else None,
         "run_id": str(call.run_id),
         "state": call.state,
         "provider": call.provider,

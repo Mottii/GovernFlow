@@ -9,7 +9,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from audit.chain import AuditEventInput
-from core.models import AgencyPrice, Budget, Price, Reservation, Run
+from core.models import AgencyPrice, Price, Reservation, Run
 from core.usage import Usage
 from policy.loop import trip
 
@@ -116,23 +116,26 @@ async def reserve(
     from policy.accounting import database_now
 
     period = (await database_now(session)).strftime("%Y-%m")
-    # Settlement takes the budget row before the run row. Reserve in that
-    # order too, otherwise concurrent calls can deadlock with settlements.
-    budget_id = (
-        await session.execute(
-            update(Budget)
-            .where(
-                Budget.workflow_id == workflow_id,
-                Budget.period == period,
-                Budget.spent_micro + Budget.reserved_micro + est_micro <= Budget.cap_micro,
-            )
-            .values(reserved_micro=Budget.reserved_micro + est_micro)
-            .returning(Budget.id)
-        )
-    ).scalar_one_or_none()
-    if budget_id is None:
+    from core.models import Workflow
+    from policy.allocations import client_bucket, workflow_bucket
+
+    workflow = await session.get(Workflow, workflow_id)
+    if workflow is None:
         await session.rollback()
         return None
+    shared = await client_bucket(session, workflow, period)
+    budget = await workflow_bucket(session, workflow, period)
+    if (
+        budget is None
+        or (
+            shared.cap_micro is not None
+            and shared.spent_micro + shared.reserved_micro + est_micro > shared.cap_micro
+        )
+        or budget.spent_micro + budget.reserved_micro + est_micro > budget.cap_micro
+    ):
+        await session.rollback()
+        return None
+    budget_id = budget.id
     await session.execute(
         insert(Run)
         .values(
@@ -147,11 +150,18 @@ async def reserve(
             select(Run.id).where(Run.workflow_id == workflow_id, Run.external_run_id == run_key)
         )
     ).scalar_one()
+    current_run = await session.get(Run, run_id)
+    if current_run and current_run.stopped:
+        await session.rollback()
+        from gateway.errors import GatewayError
+
+        raise GatewayError(503, "run_stopped", "Run is stopped; start a new run or clear its stop")
     accepted_run = (
         await session.execute(
             update(Run)
             .where(
                 Run.id == run_id,
+                Run.stopped.is_(False),
                 Run.cost_micro + Run.reserved_micro + est_micro <= Run.cap_micro,
                 Run.cost_micro + Run.reserved_micro + est_micro <= per_run_cap_micro,
                 Run.step_count < (max_steps if max_steps is not None else 2**31 - 1),
@@ -164,12 +174,15 @@ async def reserve(
         )
     ).scalar_one_or_none()
     if accepted_run is None:
-        await session.rollback()
-        persisted_run = await session.get(Run, run_id)
-        await trip(session, workflow_id, "loop_breaker", run_id=run_id if persisted_run else None)
+        # Persist a newly created stopped run too; rolling it back loses its scope.
+        await trip(session, workflow_id, "loop_breaker", run_id=run_id)
         await session.commit()
         return None
-    record = Reservation(budget_id=budget_id, run_id=run_id, est_micro=est_micro)
+    shared.reserved_micro += est_micro
+    budget.reserved_micro += est_micro
+    record = Reservation(
+        budget_id=budget_id, run_id=run_id, est_micro=est_micro, client_budget_id=shared.id
+    )
     session.add(record)
     await session.flush()
     from policy.accounting import register

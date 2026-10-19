@@ -91,6 +91,8 @@ class Workflow(Base):
     risk_class: Mapped[str] = mapped_column(Text, nullable=False)
     policy: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="active")
+    policy_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    policy_review_required: Mapped[bool] = mapped_column(Boolean, server_default="false")
 
 
 class VirtualKey(Base):
@@ -140,6 +142,8 @@ class ProviderCredential(Base):
     label: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
     ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    encryption_key_id: Mapped[str | None] = mapped_column(Text)
+    active_version_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
 
 
 class Budget(Base):
@@ -164,6 +168,8 @@ class Budget(Base):
     )
     period: Mapped[str] = mapped_column(Text, nullable=False)
     cap_micro: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, server_default="1")
+    template_revision_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     spent_micro: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
     reserved_micro: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
 
@@ -192,6 +198,9 @@ class Run(Base):
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    stopped: Mapped[bool] = mapped_column(Boolean, server_default="false")
+    stop_reason: Mapped[str | None] = mapped_column(Text)
+    stop_revision: Mapped[int] = mapped_column(Integer, server_default="0")
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="running")
     step_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
@@ -226,6 +235,7 @@ class Reservation(Base):
     run_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("runs.id"), nullable=False
     )
+    client_budget_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     est_micro: Mapped[int] = mapped_column(BigInteger, nullable=False)
     actual_micro: Mapped[int | None] = mapped_column(BigInteger)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="reserved")
@@ -327,6 +337,10 @@ class Approval(Base):
         UUID(as_uuid=True), ForeignKey("workflows.id"), nullable=False
     )
     run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    policy_version: Mapped[int] = mapped_column(Integer, server_default="0")
+    matched_rules: Mapped[list[str]] = mapped_column(JSONB, server_default="[]")
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    encryption_key_id: Mapped[str | None] = mapped_column(Text)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     content_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary)
     content_nonce: Mapped[bytes | None] = mapped_column(LargeBinary)
@@ -459,6 +473,7 @@ class ProviderAccount(Base):
     external_id: Mapped[str] = mapped_column(Text, nullable=False)
     credential_label: Mapped[str] = mapped_column(Text, server_default="default")
     inference_key_id: Mapped[str | None] = mapped_column(Text)
+    validated_credential_version_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
@@ -713,6 +728,7 @@ class IntegrationDestination(Base):
     legacy_source: Mapped[str | None] = mapped_column(Text)
     service_identity: Mapped[str | None] = mapped_column(Text)
     credential_hash: Mapped[bytes | None] = mapped_column(LargeBinary)
+    encryption_key_id: Mapped[str | None] = mapped_column(Text)
     secret_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary)
     secret_nonce: Mapped[bytes | None] = mapped_column(LargeBinary)
 
@@ -782,6 +798,9 @@ class ProviderCall(Base):
     client_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
     workflow_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
     reservation_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    client_budget_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    policy_version: Mapped[int] = mapped_column(Integer, server_default="0")
+    credential_version_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     budget_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
     run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
     period: Mapped[str] = mapped_column(Text)
@@ -865,6 +884,114 @@ class AccountingRecovery(Base):
     lease_owner: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     last_error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ClientBudget(Base):
+    __tablename__ = "client_budgets"
+    __table_args__ = (
+        UniqueConstraint("agency_id", "id"),
+        UniqueConstraint("client_id", "period"),
+        ForeignKeyConstraint(["agency_id", "client_id"], ["clients.agency_id", "clients.id"]),
+        CheckConstraint(
+            "spent_micro>=0 AND reserved_micro>=0 AND (cap_micro IS NULL OR cap_micro>=0)"
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    agency_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    client_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    period: Mapped[str] = mapped_column(Text)
+    cap_micro: Mapped[int | None] = mapped_column(BigInteger)
+    spent_micro: Mapped[int] = mapped_column(BigInteger, server_default="0")
+    reserved_micro: Mapped[int] = mapped_column(BigInteger, server_default="0")
+    revision: Mapped[int] = mapped_column(Integer, server_default="1")
+    template_revision_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+
+
+class BudgetTemplate(Base):
+    __tablename__ = "budget_templates"
+    __table_args__ = (
+        UniqueConstraint("agency_id", "id"),
+        UniqueConstraint("agency_id", "scope", "scope_id", "revision"),
+        ForeignKeyConstraint(["agency_id", "client_id"], ["clients.agency_id", "clients.id"]),
+        ForeignKeyConstraint(["agency_id", "workflow_id"], ["workflows.agency_id", "workflows.id"]),
+        CheckConstraint("scope IN ('client','workflow') AND cap_micro>=0 AND revision>0"),
+        CheckConstraint(
+            "(scope='client' AND workflow_id IS NULL AND scope_id=client_id) OR "
+            "(scope='workflow' AND workflow_id IS NOT NULL AND scope_id=workflow_id)"
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    agency_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    client_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    workflow_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    scope: Mapped[str] = mapped_column(Text)
+    scope_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    revision: Mapped[int] = mapped_column(Integer)
+    cap_micro: Mapped[int] = mapped_column(BigInteger)
+    effective_period: Mapped[str] = mapped_column(Text)
+    enabled: Mapped[bool] = mapped_column(Boolean)
+    actor: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PolicyRevision(Base):
+    __tablename__ = "policy_revisions"
+    __table_args__ = (
+        UniqueConstraint("agency_id", "id"),
+        UniqueConstraint("workflow_id", "version"),
+        ForeignKeyConstraint(["agency_id", "workflow_id"], ["workflows.agency_id", "workflows.id"]),
+        ForeignKeyConstraint(["agency_id", "client_id"], ["clients.agency_id", "clients.id"]),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    agency_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    client_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    workflow_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    version: Mapped[int] = mapped_column(Integer)
+    risk_class: Mapped[str] = mapped_column(Text)
+    policy: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    legacy_source: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    content_hash: Mapped[bytes] = mapped_column(LargeBinary)
+    actor: Mapped[str] = mapped_column(Text)
+    source_version: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class CredentialVersion(Base):
+    __tablename__ = "credential_versions"
+    __table_args__ = (
+        UniqueConstraint("agency_id", "id"),
+        UniqueConstraint("credential_id", "version"),
+        ForeignKeyConstraint(
+            ["agency_id", "credential_id"],
+            ["provider_credentials.agency_id", "provider_credentials.id"],
+        ),
+        CheckConstraint("state IN ('staged','active','retired')"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    agency_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    credential_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    version: Mapped[int] = mapped_column(Integer)
+    state: Mapped[str] = mapped_column(Text)
+    ciphertext: Mapped[bytes] = mapped_column(LargeBinary)
+    nonce: Mapped[bytes] = mapped_column(LargeBinary)
+    encryption_key_id: Mapped[str | None] = mapped_column(Text)
+    actor: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AdministrativeEvent(Base):
+    __tablename__ = "administrative_events"
+    __table_args__ = (Index("administrative_events_agency_sequence", "agency_id", "id"),)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    agency_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("agencies.id"))
+    actor: Mapped[str] = mapped_column(Text)
+    resource: Mapped[str] = mapped_column(Text)
+    resource_id: Mapped[str] = mapped_column(Text)
+    action: Mapped[str] = mapped_column(Text)
+    details: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    previous_hash: Mapped[bytes] = mapped_column(LargeBinary)
+    hash: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 # Composite ownership constraints supplement the existing stable primary keys.
@@ -953,3 +1080,86 @@ for _name in ("budgets", "runs"):
     Base.metadata.tables[_name].append_constraint(
         UniqueConstraint("agency_id", "workflow_id", "id")
     )
+
+for _name in ("client_budgets", "budget_templates", "policy_revisions", "administrative_events"):
+    if _name != "client_budgets":
+        event.listen(
+            Base.metadata,
+            "after_create",
+            DDL(  # type: ignore[no-untyped-call]
+                f"CREATE TRIGGER {_name}_immutable BEFORE UPDATE OR DELETE ON {_name} "
+                "FOR EACH ROW EXECUTE FUNCTION public.accounting_immutable()"
+            ),
+        )
+for _name in ("reservations", "provider_calls"):
+    Base.metadata.tables[_name].append_constraint(
+        ForeignKeyConstraint(
+            ["agency_id", "client_budget_id"], ["client_budgets.agency_id", "client_budgets.id"]
+        )
+    )
+Base.metadata.tables["provider_credentials"].append_constraint(UniqueConstraint("agency_id", "id"))
+Base.metadata.tables["client_budgets"].append_constraint(
+    UniqueConstraint("agency_id", "client_id", "period", "id")
+)
+Base.metadata.tables["provider_calls"].append_constraint(
+    ForeignKeyConstraint(
+        ["agency_id", "client_id", "period", "client_budget_id"],
+        [
+            "client_budgets.agency_id",
+            "client_budgets.client_id",
+            "client_budgets.period",
+            "client_budgets.id",
+        ],
+    )
+)
+
+
+class DeploymentKey(Base):
+    __tablename__ = "deployment_keys"
+    kind: Mapped[str] = mapped_column(Text, primary_key=True)
+    key_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    fingerprint: Mapped[str] = mapped_column(Text)
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    verify_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+from core.version_ddl import GUARD, TRIGGER  # noqa: E402
+
+event.listen(Base.metadata, "after_create", DDL(GUARD))  # type: ignore[no-untyped-call]
+event.listen(Base.metadata, "after_create", DDL(TRIGGER))  # type: ignore[no-untyped-call]
+
+Base.metadata.tables["credential_versions"].append_constraint(
+    UniqueConstraint("agency_id", "credential_id", "id")
+)
+Base.metadata.tables["provider_credentials"].append_constraint(
+    ForeignKeyConstraint(
+        ["agency_id", "id", "active_version_id"],
+        [
+            "credential_versions.agency_id",
+            "credential_versions.credential_id",
+            "credential_versions.id",
+        ],
+        use_alter=True,
+        name="credential_active_version_fk",
+    )
+)
+for _name in ("policy_revisions", "budget_templates"):
+    Base.metadata.tables[_name].append_constraint(
+        ForeignKeyConstraint(
+            ["agency_id", "client_id", "workflow_id"],
+            ["workflows.agency_id", "workflows.client_id", "workflows.id"],
+        )
+    )
+
+Index(
+    "credential_one_active_version",
+    CredentialVersion.credential_id,
+    unique=True,
+    postgresql_where=text("state='active'"),
+)
+Base.metadata.tables["provider_calls"].append_constraint(
+    ForeignKeyConstraint(
+        ["agency_id", "credential_version_id"],
+        ["credential_versions.agency_id", "credential_versions.id"],
+    )
+)

@@ -53,6 +53,17 @@ async def reap_stale(session: AsyncSession, before: datetime, limit: int = 100) 
     await session.commit()
     done = 0
     for identity in identities:
+        from sqlalchemy import text
+
+        available: bool = (
+            await session.execute(
+                text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key,0))"),
+                {"key": "provider-call:" + str(identity)},
+            )
+        ).scalar_one()
+        if not available:
+            await session.rollback()
+            continue
         call = (
             await session.execute(
                 select(ProviderCall)

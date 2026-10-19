@@ -99,7 +99,7 @@ async def telegram_link(session: AsyncSession, message: dict[str, Any]) -> dict[
     ).scalar_one()
     if challenge.consumed_at or challenge.expires_at <= datetime.now(UTC):
         raise GatewayError(403, "invalid_link", "Linking command has expired or was already used")
-    await principal_for_user(session, challenge.user_id, challenge.agency_id)
+    linking_actor = await principal_for_user(session, challenge.user_id, challenge.agency_id)
     await session.execute(
         text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
         {"key": "telegram-link:" + str(challenge.user_id)},
@@ -131,6 +131,17 @@ async def telegram_link(session: AsyncSession, message: dict[str, Any]) -> dict[
     )
     session.add(ExternalLoginIdentity(issuer="telegram", subject=chat, user_id=challenge.user_id))
     challenge.consumed_at = datetime.now(UTC)
+    from audit.administration import record
+
+    await record(
+        session,
+        challenge.agency_id,
+        linking_actor.email,
+        "external_identity",
+        challenge.user_id,
+        "linked",
+        changed_fields=["telegram"],
+    )
     await session.commit()
     return {"method": "sendMessage", "chat_id": chat, "text": "Telegram account linked"}
 
@@ -152,10 +163,17 @@ async def telegram_decision(request: Request, session: Db) -> dict[str, Any]:
             or query["message"]["chat"].get("type", "private") != "private"
         ):
             raise ValueError("approver")
-        identity, choice, _ = query["data"].split(":")
+        parts = query["data"].split(":")
+        if len(parts) == 4:
+            key_id, identity, choice, _ = parts
+        elif len(parts) == 3:
+            identity, choice, _ = parts
+            key_id = "0000"
+        else:
+            raise ValueError("callback")
         approval_id = uuid.UUID(identity)
         if choice not in ("a", "d") or not hmac.compare_digest(
-            callback(approval_id, choice, chat), query["data"]
+            callback(approval_id, choice, chat, key_id, legacy=len(parts) == 3), query["data"]
         ):
             raise ValueError("signature")
     except (ValueError, KeyError, TypeError) as exc:
@@ -289,6 +307,7 @@ async def webhook_decision(
         destination.agency_id,
         "integration",
         str(destination.id),
+        key_id=destination.encryption_key_id,
     )
     raw = await request.body()
     verify_signature(

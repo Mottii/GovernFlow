@@ -97,9 +97,9 @@ async def test_populated_0018_upgrade_preserves_then_corrects_uncertain_calls():
             await session.refresh(original)
             assert original.spent_micro == 15 and original.period == "2026-09"
         result = subprocess.run([*command, "downgrade", "0018"], env=env, capture_output=True)
-        assert (
-            result.returncode != 0
-            and b"Cannot downgrade active provider accounting" in result.stderr
+        assert result.returncode != 0 and (
+            b"Cannot downgrade active provider accounting" in result.stderr
+            or b"Phase 3 downgrade requires" in result.stderr
         )
     finally:
         # This disposable database deliberately has protected financial history.

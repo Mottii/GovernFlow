@@ -129,6 +129,8 @@ async def register(
         agency_id=workflow.agency_id,
         client_id=workflow.client_id,
         workflow_id=workflow.id,
+        client_budget_id=record.client_budget_id,
+        policy_version=0 if legacy else workflow.policy_version,
         budget_id=budget.id,
         run_id=record.run_id,
         period=budget.period,
@@ -150,7 +152,15 @@ async def register(
     return call
 
 
+async def call_lock(session: AsyncSession, call_id: uuid.UUID) -> None:
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key,0))"),
+        {"key": "provider-call:" + str(call_id)},
+    )
+
+
 async def locked_call(session: AsyncSession, call_id: uuid.UUID) -> ProviderCall:
+    await call_lock(session, call_id)
     call = (
         await session.execute(
             select(ProviderCall)
@@ -218,6 +228,7 @@ async def apply(
         raise EvidenceConflict("Legacy evidence requires the upgrade adapter")
     if evidence.kind == "correction" and not allow_correction:
         raise EvidenceConflict("Administrator correction requires authenticated authority")
+    call = await locked_call(session, evidence.call_id)
     await session.execute(
         text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
         {"key": f"accounting:{evidence.agency_id}:{evidence.evidence_id}"},
@@ -228,7 +239,6 @@ async def apply(
         if receipt.checksum != checksum or receipt.call_id != evidence.call_id:
             raise EvidenceConflict("Evidence identity was reused with different content")
         return "duplicate"
-    call = await locked_call(session, evidence.call_id)
     if (call.agency_id, call.client_id) != (evidence.agency_id, evidence.client_id):
         raise EvidenceConflict("Evidence ownership does not match call")
     if (
@@ -282,6 +292,12 @@ async def apply(
             if evidence.kind == "estimate"
             else evidence.amount_micro
         )
+        from policy.allocations import client_bucket
+
+        workflow = await session.get(Workflow, call.workflow_id)
+        assert workflow is not None
+        shared = await client_bucket(session, workflow, call.period)
+        call.client_budget_id = shared.id
         reservation = (
             await session.execute(
                 select(Reservation).where(Reservation.id == call.reservation_id).with_for_update()
@@ -289,21 +305,37 @@ async def apply(
         ).scalar_one()
         budget = (
             await session.execute(
-                select(Budget).where(Budget.id == call.budget_id).with_for_update()
+                select(Budget)
+                .where(Budget.id == call.budget_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
             )
         ).scalar_one()
         run = (
-            await session.execute(select(Run).where(Run.id == call.run_id).with_for_update())
+            await session.execute(
+                select(Run)
+                .where(Run.id == call.run_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
         ).scalar_one()
         held = reservation.est_micro if reservation.status == "reserved" else 0
         delta = amount - call.charged_micro
-        if budget.reserved_micro < held or run.reserved_micro < held:
+        if (
+            shared.reserved_micro < held
+            or budget.reserved_micro < held
+            or run.reserved_micro < held
+        ):
             raise EvidenceConflict("Reservation balances require operator reconciliation")
         if (
-            not 0 <= budget.spent_micro + delta <= MAX_MONEY
+            not 0 <= shared.spent_micro + delta <= MAX_MONEY
+            or not 0 <= budget.spent_micro + delta <= MAX_MONEY
             or not 0 <= run.cost_micro + delta <= MAX_MONEY
         ):
             raise EvidenceConflict("Charge exceeds representable balances")
+        reservation.client_budget_id = shared.id
+        shared.reserved_micro -= held
+        shared.spent_micro += delta
         budget.reserved_micro -= held
         budget.spent_micro += delta
         run.reserved_micro -= held
@@ -369,7 +401,11 @@ async def apply(
             call.run_id,
         )
         if delta > 0 and (
-            amount > call.estimate_micro
+            (
+                shared.cap_micro is not None
+                and shared.spent_micro + shared.reserved_micro > shared.cap_micro
+            )
+            or amount > call.estimate_micro
             or budget.spent_micro + budget.reserved_micro > budget.cap_micro
         ):
             from policy.loop import trip

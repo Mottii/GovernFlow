@@ -40,6 +40,24 @@ _cache: dict[tuple[bytes, str], Snapshot] = {}
 _lock = asyncio.Lock()
 
 
+@dataclass
+class Allowance:
+    remaining: int
+    expires: float
+    calls: set[str]
+
+
+_allowances: dict[str, Allowance] = {}
+
+
+def scope_keys(seed: CallSeed) -> tuple[str, str, str]:
+    return (
+        "client:" + str(seed.client_budget_id),
+        "workflow:" + str(seed.budget_id),
+        "run:" + str(seed.run_id),
+    )
+
+
 def request_key(request: Request) -> str:
     return (
         request.headers.get("authorization", "").removeprefix("Bearer ")
@@ -67,6 +85,18 @@ def remember(
         and isinstance(outage, dict)
         and outage.get("mode") == "open"
     ):
+        # Every cached route/key shares the same client/workflow/run allowance.
+        for scope in scope_keys(seed):
+            pool = _allowances.get(scope)
+            if pool is None or pool.expires < time.monotonic():
+                _allowances[scope] = Allowance(remaining, time.monotonic() + 60, set())
+            else:
+                pool.remaining = min(pool.remaining, remaining)
+                pool.expires = max(pool.expires, time.monotonic() + 60)
+        if len(_allowances) > 30000:
+            for identity in list(_allowances):
+                if _allowances[identity].expires < time.monotonic():
+                    del _allowances[identity]
         # Memory only; signing/encryption/provider keys never enter the disk queue.
         _cache[(virtual_key_hash(request_key(request)), request.url.path)] = Snapshot(
             auth, price, headers, url, time.monotonic() + 60, remaining, seed=seed, run_key=run_key
@@ -84,6 +114,8 @@ async def forward(request: Request) -> Response | None:
         return None
     snapshot = _cache.get((virtual_key_hash(request_key(request)), request.url.path))
     if snapshot is None or snapshot.expires < time.monotonic() or snapshot.seed is None:
+        return None
+    if snapshot.seed.client_budget_id is None or snapshot.seed.policy_version is None:
         return None
     now = datetime.now(UTC)
     run_key = request.headers.get("x-run-id") or f"window:{now:%Y%m%d%H}{now.minute // 10}"
@@ -117,12 +149,45 @@ async def forward(request: Request) -> Response | None:
         seed=seed,
     )
     async with _lock:
+        from policy.journal import SQLiteJournal
+
+        if not isinstance(service.journal, SQLiteJournal):
+            return None
+
+        # Retained dispatch intents also debit a newly warmed cache after restart or
+        # expiry. Never refund locally merely because a journal acknowledgement disappears.
+        def retained() -> list[str]:
+            with service.journal.connection() as connection:
+                return [row[0] for row in connection.execute("SELECT payload FROM evidence")]
+
+        for raw in await asyncio.to_thread(retained):
+            try:
+                previous = json.loads(raw)
+                if previous.get("reason") != "outage_dispatch_intent":
+                    continue
+                cached = CallSeed.model_validate_json(json.dumps(previous["seed"]))
+                for scope in scope_keys(cached):
+                    pool = _allowances.get(scope)
+                    if pool and previous["call_id"] not in pool.calls:
+                        pool.remaining -= previous["amount_micro"]
+                        pool.calls.add(previous["call_id"])
+            except (ValueError, KeyError, TypeError):
+                raise GatewayError(
+                    503, "recovery_unavailable", "Inspect unresolved local recovery evidence"
+                ) from None
+        pools = [_allowances.get(scope) for scope in scope_keys(seed)]
+        if any(pool is None or pool.remaining < cost for pool in pools):
+            raise GatewayError(429, "outage_limit", "Shared outage allowance exhausted")
         if (
             snapshot.calls >= min(snapshot.auth.policy.get("rpm", 60), 100)
             or snapshot.remaining < cost
         ):
             raise GatewayError(429, "outage_limit", "Replica outage allowance exhausted")
         await persist(intent.model_dump(mode="json"), store=service.journal)
+        for pool in pools:
+            assert pool is not None
+            pool.remaining -= cost
+            pool.calls.add(str(identity))
         snapshot.remaining -= cost
         snapshot.calls += 1
     request.state.call_id = str(identity)

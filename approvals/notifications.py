@@ -27,9 +27,23 @@ from core.security import decrypt_provider_key
 from gateway.errors import GatewayError
 
 
-def callback(approval_id: uuid.UUID, choice: str, chat_id: str) -> str:
+def callback(
+    approval_id: uuid.UUID,
+    choice: str,
+    chat_id: str,
+    key_id: str | None = None,
+    *,
+    legacy: bool = False,
+) -> str:
+    from core.keyrings import active_id
+
+    identity = key_id or active_id("signing")
     message = approval_id.hex + ":" + choice
-    signature = b64(hmac.digest(secret(), (message + ":" + chat_id).encode(), hashlib.sha256)[:16])
+    if not legacy:
+        message = identity + ":" + message
+    signature = b64(
+        hmac.digest(secret(identity), (message + ":" + chat_id).encode(), hashlib.sha256)[:16]
+    )
     return message + ":" + signature
 
 
@@ -85,32 +99,55 @@ async def telegram(record: Approval, action: dict[str, Any], chats: list[str]) -
 
 
 async def dispatch(session: AsyncSession) -> int:
+    from policy.revisions import lock
+
     records = (
-        (
+        await session.execute(
+            select(Notification.id, Approval.workflow_id)
+            .join(Approval, Approval.id == Notification.approval_id)
+            .where(
+                Notification.status == "pending",
+                Notification.next_attempt <= func.clock_timestamp(),
+            )
+            .limit(50)
+        )
+    ).all()
+    await session.commit()
+    sent = 0
+    for identity, workflow_id in records:
+        # Permission administration precedes policy publication; no notification locks
+        # survive from the previous delivery.
+        current = await session.get(Workflow, workflow_id)
+        if current is None:
+            await session.rollback()
+            continue
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock_shared(hashtext(:key))"),
+            {"key": "agency-permissions:" + str(current.agency_id)},
+        )
+        workflow = await lock(session, workflow_id)
+        item = (
             await session.execute(
                 select(Notification)
-                .where(
-                    Notification.status == "pending",
-                    Notification.next_attempt <= func.clock_timestamp(),
-                )
+                .where(Notification.id == identity, Notification.status == "pending")
                 .with_for_update(skip_locked=True)
-                .limit(50)
+                .execution_options(populate_existing=True)
             )
-        )
-        .scalars()
-        .all()
-    )
-    sent = 0
-    for item in records:
-        approval = await session.get(Approval, item.approval_id)
+        ).scalar_one_or_none()
+        if item is None:
+            await session.rollback()
+            continue
+        approval = await session.get(Approval, item.approval_id, populate_existing=True)
         if (
             approval is None
+            or approval.invalidated_at is not None
+            or approval.policy_version != workflow.policy_version
             or approval.status != "pending"
             or approval.expires_at <= datetime.now(UTC)
         ):
             item.status = "cancelled"
+            await session.commit()
             continue
-        workflow = await session.get(Workflow, approval.workflow_id)
         if workflow is not None:
             await session.execute(
                 text("SELECT pg_advisory_xact_lock_shared(hashtext(:key))"),
@@ -127,6 +164,7 @@ async def dispatch(session: AsyncSession) -> int:
             or not await destination_matches(session, destination, workflow)
         ):
             item.status = "cancelled"
+            await session.commit()
             continue
         client_id = workflow.client_id
         try:
@@ -142,6 +180,7 @@ async def dispatch(session: AsyncSession) -> int:
                     destination.agency_id,
                     "integration",
                     str(destination.id),
+                    key_id=destination.encryption_key_id,
                 )
                 await webhook(approval, action, destination.config["url"], key.encode())
             else:
@@ -167,6 +206,7 @@ async def dispatch(session: AsyncSession) -> int:
                         await telegram(approval, action, chats)
                 if not delivered:
                     item.status = "cancelled"
+                    await session.commit()
                     continue
             item.status = "sent"
             sent += 1
@@ -192,6 +232,7 @@ async def dispatch(session: AsyncSession) -> int:
                 seconds=min(3600, 30 * 2 ** min(item.attempts, 7))
             )
         item.attempts += 1
+        await session.commit()
     await session.commit()
     return sent
 

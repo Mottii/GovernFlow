@@ -15,6 +15,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from admin_api.auth import Actor, DbSession, client_scope, permit
+from admin_api.governance_views import governance_snapshot
 from audit.chain import AuditEventInput, append_event
 from core.models import Alert, Budget, Client, MonthlyMetric, ReconcileJob, Workflow
 
@@ -121,6 +122,15 @@ async def monthly(session: AsyncSession, client_id: uuid.UUID, period: str) -> d
     for workflow_id, count in pending:
         if workflow_id in workflows:
             workflows[workflow_id]["recovery_pending"] = count
+    from core.models import ClientBudget
+
+    client_bucket = (
+        await session.execute(
+            select(ClientBudget).where(
+                ClientBudget.client_id == client_id, ClientBudget.period == period
+            )
+        )
+    ).scalar_one_or_none()
     metric = await session.get(MonthlyMetric, (client_id, period))
     jobs = (
         (
@@ -150,6 +160,21 @@ async def monthly(session: AsyncSession, client_id: uuid.UUID, period: str) -> d
         .all()
     )
     return {
+        **await governance_snapshot(session, [client_id]),
+        "client_budget": {
+            "cap_micro": client_bucket.cap_micro,
+            "spent_micro": client_bucket.spent_micro,
+            "reserved_micro": client_bucket.reserved_micro,
+            "revision": client_bucket.revision,
+            "template_revision_id": str(client_bucket.template_revision_id)
+            if client_bucket.template_revision_id
+            else None,
+            "headroom_micro": None
+            if client_bucket.cap_micro is None
+            else client_bucket.cap_micro - client_bucket.spent_micro - client_bucket.reserved_micro,
+        }
+        if client_bucket
+        else None,
         "client": {"id": str(client.id), "name": client.name},
         "period": period,
         "timezone": "UTC",

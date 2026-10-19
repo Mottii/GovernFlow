@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import func, select
 
 from admin_api.auth import Actor, DbSession, client_scope, permit, permitted_clients, workflow_scope
+from admin_api.governance_views import governance_snapshot
 from approvals.service import content
 from core.models import (
     Alert,
@@ -82,6 +83,8 @@ async def spend(
     items: list[dict[str, Any]] = []
     for workflow, client, budget in rows:
         item = {
+            "budget_id": str(budget.id) if budget else None,
+            "budget_revision": budget.revision if budget else None,
             "id": str(workflow.id),
             "client_id": str(client.id),
             "client": client.name,
@@ -109,6 +112,31 @@ async def spend(
         if start.month == 12
         else start.replace(month=start.month + 1)
     )
+    from core.models import ClientBudget
+
+    shared = (
+        await session.execute(
+            select(ClientBudget).where(
+                ClientBudget.client_id.in_([uuid.UUID(identity) for identity in groups]),
+                ClientBudget.period == period,
+            )
+        )
+    ).scalars()
+    for bucket in shared:
+        group = groups.get(str(bucket.client_id))
+        if group is not None:
+            group.update(
+                {
+                    "cap_micro": bucket.cap_micro,
+                    "revision": bucket.revision,
+                    "headroom_micro": None
+                    if bucket.cap_micro is None
+                    else bucket.cap_micro - bucket.spent_micro - bucket.reserved_micro,
+                    "template_revision_id": str(bucket.template_revision_id)
+                    if bucket.template_revision_id
+                    else None,
+                }
+            )
     from policy.projection import facts
 
     records = await facts(
@@ -148,6 +176,7 @@ async def spend(
         if target:
             target["recovery_pending"] = count
     return {
+        **await governance_snapshot(session, [uuid.UUID(identity) for identity in groups]),
         "period": period,
         "clients": list(groups.values()),
         "workflows": items,

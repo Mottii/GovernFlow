@@ -27,6 +27,10 @@ from policy.journal import CallSeed, JournalRecord, encode, journal
 
 
 async def ensure_seed(session: AsyncSession, record: JournalRecord) -> None:
+    from policy.accounting import call_lock
+    from policy.allocations import client_bucket
+
+    await call_lock(session, record.call_id)
     seed = record.seed
     if seed is None:
         return
@@ -51,6 +55,10 @@ async def ensure_seed(session: AsyncSession, record: JournalRecord) -> None:
         return
     # An outage call consumes no uncommitted reservation. Its cached parents must already
     # exist and match authenticated ownership; materialize under the budget lock once.
+    workflow = await session.get(Workflow, seed.workflow_id)
+    if workflow is None:
+        raise EvidenceConflict("Cached workflow is unavailable")
+    shared = await client_bucket(session, workflow, seed.period)
     budget = (
         await session.execute(select(Budget).where(Budget.id == seed.budget_id).with_for_update())
     ).scalar_one_or_none()
@@ -76,6 +84,7 @@ async def ensure_seed(session: AsyncSession, record: JournalRecord) -> None:
         raise EvidenceConflict("Cached call parents do not match evidence ownership")
     reservation = Reservation(
         id=record.call_id,
+        client_budget_id=shared.id,
         budget_id=budget.id,
         run_id=run.id,
         est_micro=seed.estimate_micro,
@@ -92,6 +101,8 @@ async def ensure_seed(session: AsyncSession, record: JournalRecord) -> None:
         model=seed.model,
         pricing=seed.pricing,
     )
+    call.policy_version = seed.policy_version if seed.policy_version is not None else 0
+    call.credential_version_id = seed.credential_version_id
     call.state, call.provenance = "dispatched", "outage"
     call.dispatch_at = datetime.now(UTC)
     call.lease_until = datetime.now(UTC)

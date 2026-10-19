@@ -53,7 +53,7 @@ async def test_configured_per_run_budget_blocks_before_forwarding(governed, poli
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("limit", [{"max_steps": 3}, {"run_cost_micro": 90}, {"rpm": 3}])
-async def test_loop_soak_trips_kill_and_alert(governed, limit):
+async def test_loop_soak_stops_only_run_and_rate_limit_remains_temporary(governed, limit):
     async with governed.factory() as session:
         await session.execute(
             update(Workflow)
@@ -74,11 +74,16 @@ async def test_loop_soak_trips_kill_and_alert(governed, limit):
             )
             statuses.append(response.status_code)
         assert statuses.count(200) <= (5 if "run_cost_micro" in limit else 3)
-        assert 429 in statuses and statuses[-1] == 503
+        assert 429 in statuses and statuses[-1] == (429 if "rpm" in limit else 503)
     async with governed.factory() as session:
         flag = await session.get(KillFlag, ("workflow", str(governed.a.workflow.id)))
-        assert flag.active
-        assert (await session.execute(select(Alert))).scalars().first().kind == "loop_breaker"
+        assert flag is None
+        if "rpm" not in limit:
+            run = (
+                await session.execute(select(Run).where(Run.workflow_id == governed.a.workflow.id))
+            ).scalar_one()
+            assert run.stopped and run.stop_reason == "loop_breaker"
+            assert (await session.execute(select(Alert))).scalars().first().kind == "loop_breaker"
         assert await verify_chain(session, governed.a.client.id) == (True, None)
 
 

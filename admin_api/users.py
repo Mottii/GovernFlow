@@ -14,6 +14,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 
 from admin_api.auth import Actor, DbSession, client_scope, password_hash, permit, token_hash
+from audit.administration import record as audit_record
 from core.database import agency_rls_enabled, set_agency_context
 from core.models import AdminSession, Agency, AgencyMembership, ClientAssignment, LoginBucket, User
 
@@ -92,6 +93,17 @@ async def create_user(body: UserCreate, session: DbSession, actor: Actor) -> dic
                 for client_id in grants
             ]
         )
+        await audit_record(
+            session,
+            actor.agency_id,
+            actor.email,
+            "user",
+            user.id,
+            "created",
+            role=body.role,
+            all_clients=all_clients,
+            client_ids=[str(c) for c in grants],
+        )
         await session.commit()
     except IntegrityError as exc:
         await session.rollback()
@@ -156,6 +168,7 @@ async def disable_user(user_id: uuid.UUID, session: DbSession, actor: Actor) -> 
                 "active": False,
             }
         ),
+        actor_email=actor.email,
     )
     await session.execute(
         delete(AdminSession).where(

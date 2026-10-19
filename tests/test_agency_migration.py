@@ -42,6 +42,18 @@ async def test_agency_backfill_preserves_identifiers_credentials_and_grants():
                     {"client": client},
                 )
             ).scalar_one()
+            await conn.execute(
+                text("UPDATE workflows SET policy=CAST(:policy AS jsonb) WHERE id=:id"),
+                {"id": workflow, "policy": '{"rpm":"malformed"}'},
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO approvals(id,workflow_id,action_name,action_hash,"
+                    "action_summary,expires_at) VALUES(gen_random_uuid(),:workflow,"
+                    "'send',decode('abcd','hex'),'Legacy pending review',now()+interval '1 hour')"
+                ),
+                {"workflow": workflow},
+            )
             key_id = (
                 await conn.execute(
                     text(
@@ -96,6 +108,26 @@ async def test_agency_backfill_preserves_identifiers_credentials_and_grants():
             )
             assert (await conn.execute(text("SELECT id FROM clients"))).scalar_one() == client
             assert (await conn.execute(text("SELECT id FROM workflows"))).scalar_one() == workflow
+            policy = (
+                await conn.execute(
+                    text("SELECT policy_version,policy_review_required,policy FROM workflows")
+                )
+            ).one()
+            assert policy.policy_version == 1 and policy.policy_review_required
+            assert policy.policy["models"] == [] and policy.policy["rules"] == []
+            assert (
+                await conn.execute(text("SELECT legacy_source FROM policy_revisions"))
+            ).scalar_one() == {"rpm": "malformed"}
+            legacy_signer = (
+                await conn.execute(
+                    text(
+                        "SELECT key_id,fingerprint,verify_until > now()+interval '7 days' "
+                        "AS protected FROM deployment_keys WHERE kind='signing'"
+                    )
+                )
+            ).one()
+            assert legacy_signer.key_id == "0000" and legacy_signer.protected
+            assert legacy_signer.fingerprint == ""
             assert (await conn.execute(text("SELECT id, key_hash FROM virtual_keys"))).one() == (
                 key_id,
                 bytes.fromhex("abcd"),
@@ -143,12 +175,14 @@ async def test_agency_backfill_preserves_identifiers_credentials_and_grants():
                 await conn.execute(text("INSERT INTO agencies (name) VALUES ('New') RETURNING id"))
             ).scalar_one()
         result = subprocess.run([*command, "downgrade", "0014"], env=env, capture_output=True)
-        assert (
-            result.returncode != 0
-            and b"Cannot downgrade a multi-agency installation" in result.stderr
+        assert result.returncode != 0 and (
+            b"Cannot downgrade a multi-agency installation" in result.stderr
+            or b"Phase 3 downgrade requires" in result.stderr
         )
         async with engine.begin() as conn:
             await conn.execute(text("DELETE FROM agencies WHERE id = :other"), {"other": other})
     finally:
+        async with engine.begin() as connection:
+            await connection.execute(text("DROP SCHEMA public CASCADE"))
+            await connection.execute(text("CREATE SCHEMA public"))
         await engine.dispose()
-        subprocess.run([*command, "downgrade", "base"], env=env, check=True, capture_output=True)

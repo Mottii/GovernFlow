@@ -9,6 +9,7 @@ from sqlalchemy import delete, select, text
 from sqlalchemy.exc import IntegrityError
 
 from admin_api.auth import Actor, DbSession, client_scope, permit, platform_only
+from audit.administration import record as audit_record
 from core.database import set_agency_context
 from core.models import AdminSession, Agency, AgencyMembership, Client, ClientAssignment, User
 
@@ -31,6 +32,8 @@ async def create_agency(body: AgencyCreate, session: DbSession, actor: Actor) ->
     platform_only(actor)
     agency = Agency(name=body.name)
     session.add(agency)
+    await session.flush()
+    await audit_record(session, agency.id, actor.email, "agency", agency.id, "created")
     await session.commit()
     return {"id": str(agency.id), "name": agency.name, "status": agency.status}
 
@@ -44,7 +47,11 @@ async def agency(session: DbSession, actor: Actor) -> dict[str, str]:
 
 
 async def save_membership(
-    session: DbSession, agency_id: uuid.UUID, user_id: uuid.UUID, body: MembershipChange
+    session: DbSession,
+    agency_id: uuid.UUID,
+    user_id: uuid.UUID,
+    body: MembershipChange,
+    actor_email: str = "system",
 ) -> dict[str, Any]:
     # Serialize permission administration within an agency to protect the last administrator.
     await session.execute(
@@ -118,6 +125,18 @@ async def save_membership(
                 AdminSession.user_id == user_id,
             )
         )
+    await audit_record(
+        session,
+        agency_id,
+        actor_email,
+        "membership",
+        user_id,
+        "changed",
+        role=body.role,
+        active=body.active,
+        all_clients=body.all_clients,
+        client_ids=[str(c) for c in body.client_ids],
+    )
     try:
         await session.commit()
     except IntegrityError as exc:
@@ -137,7 +156,7 @@ async def provision_membership(
     platform_only(actor)
     await session.commit()
     await set_agency_context(session, agency_id)
-    return await save_membership(session, agency_id, user_id, body)
+    return await save_membership(session, agency_id, user_id, body, actor.email)
 
 
 @router.put("/admin/memberships/{user_id}")
@@ -151,4 +170,4 @@ async def update_membership(
         raise HTTPException(404, "Membership not found")
     for client_id in body.client_ids:
         await client_scope(session, actor, client_id)
-    return await save_membership(session, actor.agency_id, user_id, body)
+    return await save_membership(session, actor.agency_id, user_id, body, actor.email)

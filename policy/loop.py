@@ -6,7 +6,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from audit.chain import AuditEventInput, append_event
-from core.models import Alert, KillFlag, Workflow
+from core.models import Alert, KillFlag, Run, Workflow
 from gateway.errors import GatewayError
 from policy.kill import clear_cache
 
@@ -42,18 +42,29 @@ async def trip(
     run_id: uuid.UUID | None = None,
     cost_micro: int | None = None,
 ) -> None:
-    client_id = (
-        await session.execute(select(Workflow.client_id).where(Workflow.id == workflow_id))
-    ).scalar_one()
-    statement = insert(KillFlag).values(
-        scope="workflow", scope_id=str(workflow_id), active=True, reason=reason
-    )
-    await session.execute(
-        statement.on_conflict_do_update(
-            index_elements=[KillFlag.scope, KillFlag.scope_id],
-            set_={"active": True, "reason": reason},
+    workflow = await session.get(Workflow, workflow_id)
+    assert workflow is not None
+    client_id = workflow.client_id
+    if run_id is not None:
+        run = (
+            await session.execute(select(Run).where(Run.id == run_id).with_for_update())
+        ).scalar_one()
+        if run.stopped:
+            return
+        run.stopped, run.stop_reason = True, reason
+        run.stop_revision += 1
+    escalation = workflow.policy.get("stop_escalation", "run")
+    if escalation in ("workflow", "client"):
+        identity = workflow_id if escalation == "workflow" else client_id
+        statement = insert(KillFlag).values(
+            scope=escalation, scope_id=str(identity), active=True, reason=reason
         )
-    )
+        await session.execute(
+            statement.on_conflict_do_update(
+                index_elements=[KillFlag.scope, KillFlag.scope_id],
+                set_={"active": True, "reason": reason},
+            )
+        )
     session.add(
         Alert(
             client_id=client_id,

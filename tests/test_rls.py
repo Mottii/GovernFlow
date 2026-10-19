@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 import respx
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -120,6 +120,7 @@ async def isolated_database(monkeypatch):
                         client_id=client.id,
                         name=client.name,
                         risk_class="R2",
+                        policy_version=1,
                         policy={"models": ["*"], "actions": {"publish": {}}},
                     )
                     session.add(workflow)
@@ -154,7 +155,33 @@ async def isolated_database(monkeypatch):
                         ]
                     )
                     await session.flush()
+                    from admin_api.credentials import add_version
+                    from core.models import PolicyRevision
+                    from policy.revisions import digest, normalize
+
+                    normalized = normalize(workflow.policy, workflow.risk_class)
+                    session.add(
+                        PolicyRevision(
+                            agency_id=agency_id,
+                            client_id=client.id,
+                            workflow_id=workflow.id,
+                            version=1,
+                            risk_class=workflow.risk_class,
+                            policy=normalized,
+                            content_hash=digest(normalized, workflow.risk_class),
+                            actor="fixture",
+                        )
+                    )
+                    slot = (
+                        await session.execute(
+                            select(ProviderCredential).where(
+                                ProviderCredential.client_id == client.id
+                            )
+                        )
+                    ).scalar_one()
+                    await add_version(session, slot, "mock-only", "fixture", "active")
                     approval = Approval(
+                        policy_version=1,
                         workflow_id=workflow.id,
                         action_name="publish",
                         action_hash=b"f" * 32,
@@ -1002,3 +1029,181 @@ async def test_provider_accounting_corrections_and_recovery_obey_runtime_scopes(
                 with pytest.raises(DBAPIError, match="permission denied"):
                     await session.execute(text("DELETE FROM charge_entries"))
                 await session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_phase3_controls_and_immutable_history_on_restricted_login(isolated_database):
+    from audit.administration import record
+    from core.models import AdministrativeEvent, ClientBudget, CredentialVersion, PolicyRevision
+
+    db = isolated_database
+    own, other_client, foreign = db.tenants[0], db.tenants[1], db.tenants[2]
+    async with db.owner() as session:
+        admin_user = User(
+            email="phase3-admin@fixture.test",
+            role="admin",
+            password_hash=b"fixture",
+            password_salt=b"fixture",
+        )
+        operator_user = User(
+            email="phase3-operator@fixture.test",
+            role="operator",
+            password_hash=b"fixture",
+            password_salt=b"fixture",
+        )
+        session.add_all([admin_user, operator_user])
+        await session.flush()
+        session.add_all(
+            [
+                AgencyMembership(
+                    agency_id=own.agency_id, user_id=admin_user.id, role="admin", all_clients=True
+                ),
+                AgencyMembership(
+                    agency_id=own.agency_id,
+                    user_id=operator_user.id,
+                    role="operator",
+                    all_clients=False,
+                ),
+            ]
+        )
+        await session.flush()
+        session.add(
+            ClientAssignment(
+                agency_id=own.agency_id, user_id=operator_user.id, client_id=own.client.id
+            )
+        )
+        for user, token in [(admin_user, "phase3-admin"), (operator_user, "phase3-operator")]:
+            session.add(
+                AdminSession(
+                    agency_id=own.agency_id,
+                    user_id=user.id,
+                    token_hash=token_hash(token),
+                    expires_at=datetime.now(UTC) + timedelta(hours=1),
+                )
+            )
+        await session.commit()
+    admin_headers = {"authorization": "Bearer phase3-admin"}
+    operator_headers = {"authorization": "Bearer phase3-operator"}
+    viewer_headers = {"authorization": "Bearer session-A1"}
+    body = {
+        "period": f"{datetime.now(UTC):%Y-%m}",
+        "cap_micro": 100,
+        "expected_revision": 1,
+        "reason": "Agency cap",
+    }
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=admin_app), base_url="http://admin"
+    ) as admin:
+        cap = await admin.put(
+            f"/admin/clients/{own.client.id}/budget", headers=operator_headers, json=body
+        )
+        assert cap.status_code == 200, cap.text
+        assert cap.json()["reserved_micro"] == 10
+        assert (
+            await admin.put(
+                f"/admin/clients/{other_client.client.id}/budget",
+                headers=operator_headers,
+                json=body,
+            )
+        ).status_code == 404
+        assert (
+            await admin.put(
+                f"/admin/clients/{foreign.client.id}/budget", headers=admin_headers, json=body
+            )
+        ).status_code == 404
+        assert (
+            await admin.put(
+                f"/admin/clients/{own.client.id}/budget", headers=viewer_headers, json=body
+            )
+        ).status_code == 403
+        assert len((await admin.get("/admin/client-budgets", headers=viewer_headers)).json()) == 1
+        draft = await admin.put(
+            f"/admin/workflows/{own.workflow.id}/policy",
+            headers=operator_headers,
+            json={
+                "expected_active_version": 1,
+                "risk_class": "R2",
+                "policy": {"models": ["*"], "rules": []},
+                "reason": "Draft",
+            },
+        )
+        assert draft.status_code == 201, draft.text
+        version = draft.json()["version"]
+        activate = f"/admin/workflows/{own.workflow.id}/policy-revisions/{version}/activate"
+        assert (
+            await admin.post(
+                activate,
+                headers=operator_headers,
+                json={"expected_active_version": 1, "reason": "Not allowed"},
+            )
+        ).status_code == 403
+        assert (
+            await admin.post(
+                activate,
+                headers=admin_headers,
+                json={"expected_active_version": 1, "reason": "Reviewed"},
+            )
+        ).status_code == 200
+        assert (
+            await admin.get(
+                f"/admin/workflows/{foreign.workflow.id}/policy-revisions", headers=admin_headers
+            )
+        ).status_code == 404
+        assert (
+            await admin.get("/admin/administrative-events", headers=operator_headers)
+        ).status_code == 403
+        events = await admin.get("/admin/administrative-events", headers=admin_headers)
+        assert events.status_code == 200 and len(events.json()) >= 3
+        credentials = (
+            await admin.get("/admin/provider-credentials", headers=viewer_headers)
+        ).json()
+        assert {c["client_id"] for c in credentials} == {str(own.client.id)}
+        slot = credentials[0]
+        staged = await admin.post(
+            f"/admin/provider-credentials/{slot['id']}/versions",
+            headers=operator_headers,
+            json={"key": "mock-new-version", "expected_version": 1, "reason": "Rotate fixture"},
+        )
+        assert staged.status_code == 201, staged.text
+        assert "mock-new-version" not in staged.text
+        assert (
+            await admin.post(
+                f"/admin/provider-credentials/{slot['id']}/versions/2/activate",
+                headers=operator_headers,
+                json={"expected_active_version": 1, "reason": "Activate"},
+            )
+        ).status_code == 200
+    async with db.runtime() as session:
+        assert not (await session.execute(select(ClientBudget))).scalars().all()
+        await set_agency_context(session, own.agency_id)
+        assert len((await session.execute(select(ClientBudget))).scalars().all()) == 1
+        with pytest.raises(DBAPIError):
+            await session.execute(update(PolicyRevision).values(actor="tampered"))
+        await session.rollback()
+        await set_agency_context(session, own.agency_id)
+        bucket = (await session.execute(select(ClientBudget))).scalar_one()
+        old_cap = bucket.cap_micro
+        old_events = (
+            await session.execute(select(func.count()).select_from(AdministrativeEvent))
+        ).scalar_one()
+        bucket.cap_micro = 999
+        await record(
+            session,
+            own.agency_id,
+            "rollback-test",
+            "client_budget",
+            bucket.id,
+            "cap_changed",
+            cap_micro=999,
+            reason="Abort together",
+        )
+        await session.rollback()
+        await set_agency_context(session, own.agency_id)
+        assert (await session.execute(select(ClientBudget.cap_micro))).scalar_one() == old_cap
+        assert (
+            await session.execute(select(func.count()).select_from(AdministrativeEvent))
+        ).scalar_one() == old_events
+        await set_agency_context(session, own.agency_id)
+        with pytest.raises(DBAPIError, match="re-encryption requires maintenance"):
+            await session.execute(update(CredentialVersion).values(nonce=b"z" * 12))
+        await session.rollback()

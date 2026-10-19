@@ -19,6 +19,7 @@ class AuthContext:
     risk_class: str
     policy: dict[str, Any]
     key_prefix: str
+    policy_version: int = 0
     agency_id: uuid.UUID = DEFAULT_AGENCY_ID
 
 
@@ -71,12 +72,17 @@ async def resolve_virtual_key(session: AsyncSession, key: str) -> AuthContext:
     if row is None:
         raise GatewayError(401, "invalid_api_key", "A valid virtual key is required")
     record, workflow, client = row
+    if agency_rls_enabled() and (workflow.policy_version == 0 or workflow.policy_review_required):
+        raise GatewayError(
+            503, "policy_unpublished", "An administrator must publish a usable policy"
+        )
     await set_agency_context(session, client.agency_id)
     return AuthContext(
         client_id=client.id,
         workflow_id=workflow.id,
         risk_class=workflow.risk_class,
         policy=workflow.policy,
+        policy_version=workflow.policy_version,
         key_prefix=record.prefix,
         agency_id=client.agency_id,
     )

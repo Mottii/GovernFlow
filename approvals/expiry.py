@@ -10,7 +10,11 @@ from core.models import Approval, Workflow
 
 
 async def expire_record(session: AsyncSession, record: Approval) -> bool:
-    if record.status != "pending" or record.expires_at > datetime.now(UTC):
+    if (
+        record.invalidated_at is not None
+        or record.status != "pending"
+        or record.expires_at > datetime.now(UTC)
+    ):
         return False
     record.status = "expired"
     record.decided_at = datetime.now(UTC)
@@ -24,27 +28,41 @@ async def expire_record(session: AsyncSession, record: Approval) -> bool:
             client_id,
             "action_expired",
             content_ref="approval:" + str(record.id),
-            usage={"outcome": record.timeout_outcome},
+            usage={
+                "outcome": record.timeout_outcome,
+                "policy_version": record.policy_version,
+                "matched_rules": record.matched_rules,
+            },
         ),
     )
     return True
 
 
 async def expire_pending(session: AsyncSession, approval_id: uuid.UUID | None = None) -> int:
-    statement = select(Approval).where(
+    from policy.revisions import lock
+
+    statement = select(Approval.id, Approval.workflow_id).where(
         Approval.status == "pending", Approval.expires_at <= datetime.now(UTC)
     )
     if approval_id is not None:
         statement = statement.where(Approval.id == approval_id)
-    records = (
-        (await session.execute(statement.with_for_update(skip_locked=True).limit(500)))
-        .scalars()
-        .all()
-    )
-    for record in records:
-        await expire_record(session, record)
+    candidates = (await session.execute(statement.limit(500))).all()
     await session.commit()
-    return len(records)
+    count = 0
+    for identity, workflow_id in candidates:
+        workflow = await lock(session, workflow_id)
+        record = (
+            await session.execute(
+                select(Approval)
+                .where(Approval.id == identity)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if record is not None and record.policy_version == workflow.policy_version:
+            count += int(await expire_record(session, record))
+        await session.commit()
+    return count
 
 
 async def main() -> None:

@@ -17,7 +17,14 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from core.database import set_agency_context
-from core.models import Budget, ProviderAccount, ProviderCredential, Run
+from core.models import (
+    Budget,
+    CredentialVersion,
+    ProviderAccount,
+    ProviderCall,
+    ProviderCredential,
+    Run,
+)
 from core.security import decrypt_provider_key
 from core.usage import Usage
 from gateway.adapters.openai import ChatStreamTracker
@@ -82,22 +89,59 @@ async def proxy_native(
         )
     credential = (
         await session.execute(
-            select(ProviderCredential).where(
+            select(ProviderCredential)
+            .where(
                 ProviderCredential.client_id == auth.client_id,
                 ProviderCredential.provider == provider,
                 ProviderCredential.label == (account.credential_label if account else "default"),
             )
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
     if credential is None:
         raise GatewayError(503, "provider_not_configured", "Provider credential is not configured")
+    selected = (
+        await session.get(CredentialVersion, credential.active_version_id)
+        if credential.active_version_id
+        else None
+    )
+    if selected is None:
+        from core.database import agency_rls_enabled
+
+        has_history = (
+            await session.execute(
+                select(CredentialVersion.id)
+                .where(CredentialVersion.credential_id == credential.id)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if agency_rls_enabled() or has_history is not None:
+            raise GatewayError(
+                503, "credential_retired", "No active credential version is configured"
+            )
+        # Metadata-only legacy fixtures use the original slot without migration backfill.
+    if selected is not None and (
+        selected.state != "active" or selected.credential_id != credential.id
+    ):
+        raise GatewayError(503, "credential_retired", "No active credential version is configured")
+    if (
+        required
+        and selected is not None
+        and account is not None
+        and account.validated_credential_version_id != selected.id
+    ):
+        raise GatewayError(
+            503, "provider_account_unmapped", "Validate the current credential version"
+        )
     try:
         key = decrypt_provider_key(
-            credential.ciphertext,
-            credential.nonce,
+            selected.ciphertext if selected else credential.ciphertext,
+            selected.nonce if selected else credential.nonce,
             credential.client_id,
             credential.provider,
             credential.label,
+            key_id=selected.encryption_key_id if selected else credential.encryption_key_id,
         )
     except (InvalidTag, RuntimeError, UnicodeDecodeError) as exc:
         raise GatewayError(
@@ -116,6 +160,13 @@ async def proxy_native(
     service = runtime(request)
     service.workflow(auth.workflow_id)
     request.state.admitted_workflow = auth.workflow_id
+    from policy.revisions import lock as policy_lock
+
+    current_policy = await policy_lock(session, auth.workflow_id)
+    if current_policy.policy_version != auth.policy_version:
+        raise GatewayError(
+            409, "policy_changed", "Policy changed before admission; retry the request"
+        )
     held = await reserve(
         session,
         auth.workflow_id,
@@ -129,6 +180,10 @@ async def proxy_native(
     )
     if held is None:
         raise GatewayError(429, "budget_exceeded", "Workflow budget exceeded")
+    call = await session.get(ProviderCall, held.id)
+    assert call is not None
+    call.credential_version_id = selected.id if selected else None
+    call.policy_version = auth.policy_version
     assert isinstance(session.bind, AsyncEngine)
     factory = async_sessionmaker(session.bind, expire_on_commit=False)
     http = service.http
@@ -140,6 +195,10 @@ async def proxy_native(
     if provider == "openai" and account is not None:
         headers["OpenAI-Project"] = account.external_id
     budget = (await session.execute(select(Budget).where(Budget.id == held.budget_id))).scalar_one()
+    from core.models import ClientBudget
+
+    shared_bucket = await session.get(ClientBudget, call.client_budget_id)
+    assert shared_bucket is not None
     run = (await session.execute(select(Run).where(Run.id == held.run_id))).scalar_one()
     from policy.journal import CallSeed
 
@@ -152,8 +211,14 @@ async def proxy_native(
         min(
             budget.cap_micro - budget.spent_micro - budget.reserved_micro,
             run.cap_micro - run.cost_micro - run.reserved_micro,
+            shared_bucket.cap_micro - shared_bucket.spent_micro - shared_bucket.reserved_micro
+            if shared_bucket.cap_micro is not None
+            else 2**63 - 1,
         ),
         seed=CallSeed(
+            client_budget_id=call.client_budget_id,
+            policy_version=call.policy_version,
+            credential_version_id=call.credential_version_id,
             budget_id=budget.id,
             run_id=run.id,
             workflow_id=auth.workflow_id,

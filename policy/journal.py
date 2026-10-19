@@ -22,6 +22,9 @@ def encode(payload: dict[str, Any]) -> bytes:
 
 class CallSeed(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
+    client_budget_id: uuid.UUID | None = None
+    policy_version: int | None = None
+    credential_version_id: uuid.UUID | None = None
     budget_id: uuid.UUID
     run_id: uuid.UUID
     workflow_id: uuid.UUID

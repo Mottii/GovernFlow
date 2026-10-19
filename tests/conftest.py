@@ -49,9 +49,10 @@ async def gateway_runtime(metadata_database_auth, monkeypatch, tmp_path):
 
 @pytest_asyncio.fixture
 async def governed(monkeypatch: pytest.MonkeyPatch, tmp_path):
-    from gateway.outage import _cache
+    from gateway.outage import _allowances, _cache
 
     _cache.clear()
+    _allowances.clear()
     url = os.environ.get("APP_TEST_DATABASE_URL")
     if not url:
         pytest.skip("APP_TEST_DATABASE_URL is required")

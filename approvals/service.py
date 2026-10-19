@@ -44,7 +44,19 @@ def action_hash(name: str, action: dict[str, Any]) -> bytes:
 
 
 def view(record: Approval) -> dict[str, Any]:
+    if record.invalidated_at is not None:
+        return {
+            "approval_id": str(record.id),
+            "status": record.status,
+            "decision": "deny",
+            "reason": "policy_changed",
+            "policy_version": record.policy_version,
+            "matched_rules": record.matched_rules,
+            "expires_at": record.expires_at.isoformat(),
+        }
     result: dict[str, Any] = {
+        "policy_version": record.policy_version,
+        "matched_rules": record.matched_rules,
         "approval_id": str(record.id),
         "status": record.status,
         "decision": "allow"
@@ -73,6 +85,8 @@ def view(record: Approval) -> dict[str, Any]:
                     "purpose": "execute",
                     "approval_id": str(record.id),
                     "workflow_id": str(record.workflow_id),
+                    "policy_version": record.policy_version,
+                    "matched_rules": record.matched_rules,
                     "action_hash": record.action_hash.hex(),
                     "exp": int(expiry.timestamp()),
                 }
@@ -87,7 +101,12 @@ def content(record: Approval, client_id: uuid.UUID) -> dict[str, Any]:
         dict[str, Any],
         json.loads(
             decrypt_provider_key(
-                record.content_ciphertext, record.content_nonce, client_id, "action", str(record.id)
+                record.content_ciphertext,
+                record.content_nonce,
+                client_id,
+                "action",
+                str(record.id),
+                key_id=record.encryption_key_id,
             )
         ),
     )
@@ -95,11 +114,14 @@ def content(record: Approval, client_id: uuid.UUID) -> dict[str, Any]:
 
 async def check(session: AsyncSession, auth: AuthContext, body: ActionCheck) -> dict[str, Any]:
     await check_kill(session, auth)
-    actions = auth.policy.get("actions", {})
-    if not isinstance(actions, dict):
-        raise GatewayError(503, "invalid_policy", "Action policy is invalid")
-    rule = actions.get(body.action_name)
-    if rule is None and auth.policy.get("strict_actions", True):
+    from policy.revisions import evaluate, lock
+
+    workflow = await lock(session, auth.workflow_id)
+    try:
+        evaluation = evaluate(workflow.policy, workflow.risk_class, body.action_name, body.action)
+    except (ValueError, TypeError) as error:
+        raise GatewayError(503, "invalid_policy", "Workflow policy requires review") from error
+    if evaluation["decision"] == "deny":
         await append_event(
             session,
             AuditEventInput(
@@ -108,36 +130,29 @@ async def check(session: AsyncSession, auth: AuthContext, body: ActionCheck) -> 
                 usage={
                     "workflow_id": str(auth.workflow_id),
                     "action_name": body.action_name,
-                    "reason": "unknown_action",
+                    "reason": evaluation["reason"],
+                    "policy_version": workflow.policy_version,
+                    "matched_rules": evaluation["matched_rules"],
                 },
                 content_ref="action-hash:" + action_hash(body.action_name, body.action).hex(),
             ),
         )
         await session.commit()
-        return {"decision": "deny", "status": "denied", "reason": "unknown_action"}
-    if rule is None:
-        rule = {}
-    if not isinstance(rule, dict) or rule.get("risk_class", auth.risk_class) not in (
-        "R0",
-        "R1",
-        "R2",
-        "R3",
-    ):
-        raise GatewayError(503, "invalid_policy", "Action risk is invalid")
-    risk = max(auth.risk_class, rule.get("risk_class", auth.risk_class))
-    timeout = rule.get("timeout_seconds", 3600)
-    outcome = rule.get("on_timeout", "deny")
-    if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= 604800:
-        raise GatewayError(503, "invalid_policy", "Action timeout is invalid")
-    if outcome not in ("allow", "deny") or (outcome == "allow" and risk >= "R2"):
-        raise GatewayError(503, "invalid_policy", "High-risk actions must deny on timeout")
-    require_approval = rule.get("require_approval", False)
-    if not isinstance(require_approval, bool):
-        raise GatewayError(503, "invalid_policy", "require_approval must be boolean")
-    automatic = risk < "R2" and not require_approval
+        return {
+            "decision": "deny",
+            "status": "denied",
+            "reason": evaluation["reason"],
+            "policy_version": workflow.policy_version,
+            "matched_rules": evaluation["matched_rules"],
+        }
+    risk = evaluation["risk_class"]
+    timeout, outcome = evaluation["timeout_seconds"], evaluation["on_timeout"]
+    automatic = evaluation["decision"] == "allow"
     now = datetime.now(UTC)
     record = Approval(
         id=uuid.uuid4(),
+        policy_version=workflow.policy_version,
+        matched_rules=evaluation["matched_rules"],
         workflow_id=auth.workflow_id,
         action_name=body.action_name,
         action_hash=action_hash(body.action_name, body.action),
@@ -148,6 +163,9 @@ async def check(session: AsyncSession, auth: AuthContext, body: ActionCheck) -> 
         approver="policy" if automatic else None,
         decided_at=now if automatic else None,
     )
+    from core.keyrings import active_id
+
+    record.encryption_key_id = active_id("encryption")
     record.content_ciphertext, record.content_nonce = encrypt_provider_key(
         json.dumps(body.action, allow_nan=False), auth.client_id, "action", str(record.id)
     )
@@ -160,6 +178,8 @@ async def check(session: AsyncSession, auth: AuthContext, body: ActionCheck) -> 
             usage={
                 "workflow_id": str(auth.workflow_id),
                 "risk_class": risk,
+                "policy_version": record.policy_version,
+                "matched_rules": record.matched_rules,
                 "action_name": body.action_name,
                 "action_hash": record.action_hash.hex(),
             },
@@ -175,13 +195,15 @@ async def check(session: AsyncSession, auth: AuthContext, body: ActionCheck) -> 
                 usage={
                     "workflow_id": str(auth.workflow_id),
                     "approver": "policy",
+                    "policy_version": record.policy_version,
+                    "matched_rules": record.matched_rules,
                     "action_hash": record.action_hash.hex(),
                 },
                 content_ref="approval:" + str(record.id),
             ),
         )
     if record.status == "pending":
-        channels = auth.policy.get("approval_channels", ["telegram", "email", "webhook"])
+        channels = workflow.policy.get("approval_channels", ["telegram", "email", "webhook"])
         if not isinstance(channels, list) or any(
             channel not in ("telegram", "email", "webhook") for channel in channels
         ):
@@ -189,7 +211,6 @@ async def check(session: AsyncSession, auth: AuthContext, body: ActionCheck) -> 
         from approvals.reviewers import destination_matches
 
         await session.flush()
-        workflow = await session.get(Workflow, auth.workflow_id)
         assert workflow is not None
         destinations = (
             await session.execute(
@@ -215,6 +236,9 @@ async def check(session: AsyncSession, auth: AuthContext, body: ActionCheck) -> 
 
 
 async def scoped(session: AsyncSession, auth: AuthContext, approval_id: uuid.UUID) -> Approval:
+    from policy.revisions import lock
+
+    workflow = await lock(session, auth.workflow_id)
     record = (
         await session.execute(
             select(Approval).where(
@@ -224,15 +248,30 @@ async def scoped(session: AsyncSession, auth: AuthContext, approval_id: uuid.UUI
     ).scalar_one_or_none()
     if record is None:
         raise GatewayError(404, "approval_not_found", "Approval was not found")
+    if record.policy_version != workflow.policy_version and record.consumed_at is None:
+        record.invalidated_at = datetime.now(UTC)
     return record
 
 
 async def decide(session: AsyncSession, approval_id: uuid.UUID, body: Decision) -> dict[str, Any]:
+    from policy.revisions import lock
+
+    initial = await session.get(Approval, approval_id)
+    if initial is None:
+        raise GatewayError(404, "approval_not_found", "Approval was not found")
+    workflow = await lock(session, initial.workflow_id)
     record = (
-        await session.execute(select(Approval).where(Approval.id == approval_id).with_for_update())
+        await session.execute(
+            select(Approval)
+            .where(Approval.id == approval_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
     ).scalar_one_or_none()
     if record is None:
         raise GatewayError(404, "approval_not_found", "Approval was not found")
+    if record.invalidated_at is not None or record.policy_version != workflow.policy_version:
+        raise GatewayError(409, "policy_changed", "Policy changed; submit a fresh action check")
     if await expire_record(session, record):
         await session.commit()
     if record.status != "pending":
@@ -251,6 +290,8 @@ async def decide(session: AsyncSession, approval_id: uuid.UUID, body: Decision) 
             usage={
                 "workflow_id": str(record.workflow_id),
                 "approver": record.approver,
+                "policy_version": record.policy_version,
+                "matched_rules": record.matched_rules,
                 "action_hash": record.action_hash.hex(),
             },
             content_ref="approval:" + str(record.id),

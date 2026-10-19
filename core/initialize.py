@@ -54,6 +54,10 @@ async def initialize() -> None:
             await connection.execute(text("GRANT governflow_runtime TO governflow_app"))
         async with async_sessionmaker(engine, expire_on_commit=False)() as session:
             await seed(session)
+            from core.rotation import observe, preflight
+
+            await preflight(session)
+            await observe(session)
     finally:
         await engine.dispose()
 

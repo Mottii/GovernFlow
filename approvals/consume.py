@@ -34,6 +34,9 @@ async def consume(session: AsyncSession, auth: AuthContext, body: ActionConsume)
         raise GatewayError(
             403, "invalid_decision_token", "Execution token binding is invalid"
         ) from exc
+    from policy.revisions import lock
+
+    workflow = await lock(session, auth.workflow_id)
     record = (
         await session.execute(
             select(Approval)
@@ -47,6 +50,10 @@ async def consume(session: AsyncSession, auth: AuthContext, body: ActionConsume)
         or not hmac.compare_digest(record.action_hash, action_hash(body.action_name, body.action))
     ):
         raise GatewayError(403, "action_mismatch", "Execution token does not match the action")
+    if record.invalidated_at is not None or record.policy_version != workflow.policy_version:
+        raise GatewayError(409, "policy_changed", "Policy changed; submit a fresh action check")
+    if payload.get("policy_version", record.policy_version) != record.policy_version:
+        raise GatewayError(403, "invalid_decision_token", "Policy binding is invalid")
     timeout_allow = (
         record.status == "expired" and record.timeout_outcome == "allow" and auth.risk_class < "R2"
     )
@@ -58,7 +65,12 @@ async def consume(session: AsyncSession, auth: AuthContext, body: ActionConsume)
         AuditEventInput(
             auth.client_id,
             "action_consumed",
-            usage={"workflow_id": str(auth.workflow_id), "action_hash": record.action_hash.hex()},
+            usage={
+                "workflow_id": str(auth.workflow_id),
+                "action_hash": record.action_hash.hex(),
+                "policy_version": record.policy_version,
+                "matched_rules": record.matched_rules,
+            },
             content_ref="approval:" + str(record.id),
         ),
     )
