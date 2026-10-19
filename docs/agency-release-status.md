@@ -42,7 +42,7 @@ Agency creation and initial membership provisioning remain operator operations. 
 
 ## Next work
 
-Phase 3 adds shared client budgets, recurring UTC budgets, scoped run stops, versioned policies, and credential/key rotation. Phases 3–8 remain pending under the agency release brief. AWS deployment, Cognito, live external transport/provider verification, and hosted pilot acceptance remain later gates.
+Phase 4 is next: guided onboarding, ordinary inference without mandatory reporting credentials for new gateway-observed setups, explicit reconciliation coverage, and dashboard list/health controls. Public run lifecycle and business-action callbacks/outcomes remain Phase 5. AWS deployment, Cognito, live external transport/provider verification, and hosted pilot acceptance remain later gates.
 
 ## Phase 2 complete — 2026-10-18
 
@@ -62,6 +62,26 @@ The proxy reuses application-lifetime HTTP clients, enforces provider-native out
 - Final local mock benchmark: **200 requests at 20 rps**, direct-provider p95 **3.341 ms**, gateway p95 **31.634 ms**, paired added-latency p50 **16.904 ms** and p95 **30.427 ms**, below the **100 ms** target. Environment: macOS 26.6.2 arm64 client, Docker aarch64 with 10 CPUs and 7.75 GiB memory, Postgres 16, default gateway concurrency 128 and pool 10. Gateway memory after the run was approximately 79 MiB. This is a development benchmark, not a hosted capacity claim.
 
 See [provider accounting and recovery](phase2-accounting.md) for the implementation sequence, APIs, defaults, S3 permissions, durability boundaries, and maintenance-window upgrade/rollback procedure. S3 emulator acceptance does not establish actual AWS IAM, bucket-policy, or task-replacement correctness; those require hosted acceptance in Phase 7. Live provider charges and external notification delivery remain Phase 8.
+
+## Phase 3 complete — 2026-10-19
+
+Migration `0020` and the applications add shared client monthly tracking/caps, versioned recurring templates, run-scoped stops, immutable policy revisions, encrypted credential versions, deployment key rings, and an append-only agency administrative audit stream. New client caps include existing spend and reservations. Original-month accounting and legacy recovery receipts remain intact. UTC renewal is available both through the worker and admission path, without overwriting manual buckets or carrying unused allowance forward.
+
+The Governance dashboard provides reusable budget, guided policy, and credential controls. Policies use flat deterministic conditions, deny/review/allow precedence, unmatched denial, and R2/R3 human-review floors. Operators draft/preview; administrators publish/rollback. Publication invalidates prior outstanding approvals and unconsumed tokens across every channel. Admitted provider calls retain their policy and credential version. Credential activation invalidates mapping validation; retirement without replacement disables new calls for the slot.
+
+Deployment key rings keep legacy encryption/token formats readable. Preflight refuses removal of referenced encryption keys or protected verification keys and detects reused key IDs with different material. Owner maintenance supports resumable batched re-encryption and retirement checks. The signing retention window is seven days plus five minutes after the last old signer stops and maintenance observes retirement. Administrative mutations and their allowlisted audit entries commit together under tenant isolation.
+
+### Acceptance evidence
+
+- **114 backend tests passed** against two disposable Postgres 16 databases and Moto 5.2.4 S3. The final expanded mixed race also passes with **200 calls across two workflows sharing one client cap**, competing with measurement, settlement, reaping, duplicate recovery, and cap changes. Separate allocation tests exhaust one shared cap without double allocation. Mid-month activation/lowering preserves spend and holds; concurrent renewal preserves manual caps; lazy UTC rollover and late original-month measurements remain consistent.
+- Run-limit and overrun tests preserve full charges and leave sibling runs usable within their budgets. Stop clearing requires remaining limits; ordinary RPM remains temporary backpressure. Policy tests cover every condition operator, malformed/missing operands, recipient boundaries, precedence, risk floors, preview/live parity, stale publication, rollback lineage, and legacy signed formats.
+- Publication races consumption, expiry, notification delivery, and human decisions. Follow-up dashboard, authenticated email, linked Telegram, and signed webhook attempts reject stale work with `policy_changed`. Concurrent preloaded human decisions refresh the locked approval and allow only one transition. Credential tests pin slow admitted calls across activation, block retirement without replacement, preserve plaintext through interrupted batches, and reject premature key removal or key-ID reuse.
+- Restricted-login tests run new interfaces across two agencies and multiple clients, verify mapping invalidation, ownership constraints, immutable policy/credential history, and transactional audit rollback. Populated upgrades preserve identifiers, balances, historical audit data, and encrypted secrets; malformed legacy policies remain blocked with their original source retained. Legacy approvals create a protected signing-key marker. Fresh migration round-trip passes; populated Phase 3 downgrade requires backup restoration.
+- The existing **100 simultaneous slow streams on a five-connection pool** gate passes with no database connections held during provider waits. Backend/Python SDK strict mypy, Ruff, JavaScript SDK tests, dashboard TypeScript checks and production build, isolated Compose build/initialization/workers, and redacted source/history secret scans pass.
+- **Four Playwright tests passed** against the rebuilt isolated stack: native call/spend/stop/mobile/sign-out, cross-origin mutation rejection, operator draft/preview with administrator publication/rollback, and recurring client allowance plus credential stage/activate/retire. Mobile controls fit a 390px viewport; policy and credential screenshots were inspected.
+- Local deterministic mock benchmark: **200 requests at 20 rps**, direct-provider p95 **6.247 ms**, gateway p95 **46.152 ms**, paired added-latency p50 **28.513 ms** and p95 **43.356 ms**, below the **100 ms** target. Environment: macOS 26.7.1 arm64 client, Docker aarch64 with 10 CPUs and 7.75 GiB memory, Postgres 16, gateway concurrency 128 and pool 10. This measures local development latency, not hosted capacity.
+
+See [the Phase 3 operating guide](phase3-controls.md) for interfaces, semantics, key maintenance, and the maintenance-window upgrade. Live provider charges, real Telegram/SMTP/webhook delivery, AWS key distribution/IAM, and hosted replacement/restore verification remain unverified later-phase gates. Mock and S3-emulator acceptance do not establish live production readiness.
 
 ## Prior milestones
 

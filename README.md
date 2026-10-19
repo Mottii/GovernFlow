@@ -19,7 +19,7 @@ The starter implements section 18, phases 1–4, of [the project specification](
 - **Pending live verification:** Real provider calls and captures, OpenAI/Anthropic organization reporting, Telegram delivery, SMTP delivery, and external webhook delivery. These require suitable accounts, credentials, and reachable endpoints.
 - **Local demo:** Docker Compose defaults to a mock provider. No paid inference account is needed for this demo.
 
-See [acceptance evidence](docs/phase-exits.md) for the checks performed and [implementation decisions](docs/decisions.md) for corrections and schema departures from the specification. Treat this as a starter to validate in your environment before a client deployment.
+The agency release adds shared client budgets, recurring UTC budgets, versioned policies with a guided builder, credential rotation, and deployment key rings. See [agency acceptance evidence](docs/agency-release-status.md), the [Phase 3 operating guide](docs/phase3-controls.md), [original acceptance evidence](docs/phase-exits.md), and [implementation decisions](docs/decisions.md). Validate these controls in your environment before a client deployment.
 
 ## Contents
 
@@ -48,13 +48,14 @@ See [acceptance evidence](docs/phase-exits.md) for the checks performed and [imp
 | --- | --- |
 | Native model APIs | OpenAI Chat Completions, Responses, and embeddings; Anthropic Messages; Gemini generation and streaming |
 | Tenant isolation | Client-scoped workflows, credentials, virtual keys, approvals, audit events, and reports |
-| Credential protection | AES-GCM encryption for provider credentials and hashes for workflow virtual keys |
-| Spending controls | Atomic monthly and per-run reservations in Postgres; integer micro-USD accounting |
+| Credential protection | Encrypted staged/active/retired provider versions, deployment key rings, and hashed workflow virtual keys |
+| Spending controls | Atomic client/workflow/monthly and per-run reservations; optional recurring UTC caps; integer micro-USD accounting |
 | Streaming accounting | Usage parsed from a copy of the stream; interrupted or unmeasured calls explicitly estimated |
 | Workflow controls | Model allowlists, shared rate limits, step limits, loop breaking, and kill flags |
 | Action approvals | Check, poll, human decision, expiry, and atomic single-use token consumption |
 | Approval channels | Dashboard, Telegram, SMTP review links, and signed webhooks |
-| Audit | Append-only hash chains per client, with a verification command |
+| Policy revisions | Guided flat rules, sample preview, immutable drafts, administrator publication and rollback, stale approval invalidation |
+| Audit | Append-only client and agency administration hash chains; client-chain verification command |
 | Provider reconciliation | Daily OpenAI project and Anthropic workspace comparisons with drift alerts |
 | Reporting | Monthly JSON, CSV, and printable HTML; documented measured or estimated savings |
 | Dashboard | Separate admin API, authenticated sessions, and four roles with optional client scope |
@@ -79,10 +80,10 @@ For a model call, the gateway:
 
 1. Authenticates the virtual key and identifies its client and workflow.
 2. Checks kill flags, the model allowlist, pricing, rate limits, and run limits.
-3. Atomically reserves an estimated charge against the monthly and run budgets.
+3. Atomically reserves an estimated charge against the client monthly, workflow monthly, and run budgets.
 4. Forwards to the selected provider using the client's encrypted inference credential.
 5. Reads usage, settles the reservation, and appends an audit event.
-6. Records the full cost and stops subsequent calls if an overrun trips the workflow.
+6. Records the full cost and stops the offending run after an overrun; a published policy may escalate to its workflow or client.
 
 The gateway preserves each provider's dialect and native error shape. It does not translate an Anthropic request into OpenAI or switch providers automatically. Streaming response bytes are forwarded while a copy is parsed for accounting. For OpenAI Chat, the gateway may request the final usage chunk and hide a usage-only chunk it injected when the caller did not request one.
 
@@ -280,7 +281,7 @@ Where the node supports custom headers, use the n8n execution ID as `X-Run-Id`. 
 
 ## Workflow policies and budgets
 
-A workflow belongs to a client and has a risk class and JSON policy. For example, the `policy` field in `POST /admin/workflows` can contain:
+A workflow belongs to a client and has a risk class and versioned JSON policy. Operators can create workflows and draft policies; an administrator must publish their first policy before calls are eligible. Governance → Policy builder provides settings, named rules, condition rows, sample-action preview, revision comparison, publication, and rollback. For example, the `policy` field in `POST /admin/workflows` can contain:
 
 ```json
 {
@@ -292,14 +293,15 @@ A workflow belongs to a client and has a risk class and JSON policy. For example
     "rpm": 120,
     "run_cost_micro": 500000
   },
-  "strict_actions": true,
-  "actions": {
-    "send_email": {
-      "risk_class": "R2",
-      "timeout_seconds": 3600,
-      "on_timeout": "deny"
-    }
-  },
+  "rules": [{
+    "id": "review-email",
+    "action_name": "send_email",
+    "outcome": "review",
+    "risk_class": "R2",
+    "conditions": [],
+    "timeout_seconds": 3600,
+    "on_timeout": "deny"
+  }],
   "outage": {"mode": "closed"}
 }
 ```
@@ -309,12 +311,14 @@ This live-model example requires a configured provider credential and model pric
 ### Budget rules
 
 - **Money:** `1 USD = 1,000,000 micro-USD`. Budget and cost fields are integers; `500000` represents $0.50.
-- **Monthly cap:** Create a budget for the workflow and the current UTC `YYYY-MM`. Provision the next month's budget explicitly; there is no automatic rollover.
+- **Monthly caps:** Workflow budgets are required; a nullable client cap tracks combined spend without imposing a client limit. Existing creation APIs stay one-off. Monthly templates renew through both the worker and admission path; dashboard budget forms default to recurrence and show that choice. Unused allowance never carries forward.
 - **Per-run cap:** `per_run_micro`, nested `budget.per_run_micro`, and `loop_breaker.run_cost_micro` are supported. If several are supplied, the smallest applies.
 - **Run identity:** Send a stable `X-Run-Id` for each execution. Reusing it reuses that run's accounting. Without it, calls share a ten-minute workflow window.
 - **Access:** Models must match the allowlist and have a usable price. An absent allowlist denies model access.
-- **Concurrency:** Postgres locks coordinate reservations across replicas so concurrent calls cannot reserve the same remaining balance.
-- **Overruns:** If actual cost exceeds a reservation, the full charge is recorded, `budget_overrun` is emitted, and subsequent calls stop. A pre-call estimate cannot guarantee that final provider charges never exceed a cap.
+- **Concurrency:** Postgres locks coordinate all three accounting levels across replicas. Enabling or lowering a client cap preserves existing spend and in-flight reservations.
+- **Overruns:** The full charge is recorded, `budget_overrun` is emitted, and the offending run stops by default. Sibling runs remain usable within their budgets. Explicit clearing needs a reason and room under current limits; corrections never silently clear a stop.
+
+Policy publication invalidates outstanding approvals and unconsumed tokens with `policy_changed`. Rollback publishes a new revision. See the [Phase 3 operating guide](docs/phase3-controls.md) for budget templates, condition semantics, revision preconditions, run stops, credential rotation, audit, and upgrade procedures.
 
 Native output-token limits are enforced before reservation and forwarding. Missing limits receive the configured default; explicit valid limits are preserved. Missing terminal stream usage, including an interrupted OpenAI stream, settles an explicitly marked estimate. Later measured evidence adjusts the same call through an append-only ledger. Estimates and corrections remain visible in reports. See [provider accounting and recovery](docs/phase2-accounting.md).
 
@@ -351,7 +355,7 @@ Install from the repository root:
 uv pip install ./sdks/python
 ```
 
-Create a workflow with the `send_email` action rule through `POST /admin/workflows`, then obtain its virtual key before running this example. The starter dashboard's workflow form exposes basic model and budget settings; use the API for the full policy object. The mock seed's workflow has no action rules. This callback only prints a demo message; replace it with your business operation after testing.
+Create a workflow with the `send_email` action rule through the guided policy builder or `POST /admin/workflows`, have an administrator publish the policy, then obtain its virtual key before running this example. The mock seed's workflow has no action rules. This callback only prints a demo message; replace it with your business operation after testing.
 
 ```python
 import asyncio
@@ -502,6 +506,8 @@ Start with [.env.example](.env.example). Keep real values in the ignored `.env` 
 | `POSTGRES_HOST_PORT` | Optional Compose host port; defaults to `55433` |
 | `MASTER_ENCRYPTION_KEY` | Base64-encoded 32-byte key for encrypted credentials and approval content |
 | `DECISION_SIGNING_KEY` | Base64-encoded 32-byte action token signing key; gateway-side only for SDK use |
+| `ENCRYPTION_KEYS`, `SIGNING_KEYS` | Optional deployment JSON key maps; legacy single keys remain entry `0000` |
+| `ACTIVE_ENCRYPTION_KEY_ID`, `ACTIVE_SIGNING_KEY_ID` | Active four-digit lowercase hex IDs, default `0000`; preserve old keys during rotation |
 | `ADMIN_TOKEN` | Bootstrap administrator bearer token |
 | `DASHBOARD_ADMIN_EMAIL`, `DASHBOARD_ADMIN_PASSWORD` | Initial administrator created by the bootstrap script; password must be at least 12 characters |
 | `ADMIN_API_URL` | Dashboard server's admin API origin; Compose sets `http://admin-api:8001` |
@@ -528,7 +534,7 @@ Start with [.env.example](.env.example). Keep real values in the ignored `.env` 
 | `DB_POOL_SIZE` | Per-process Postgres pool size `10`, without overflow |
 | `E2E_SEED_FILE` | Private generated mock acceptance login file; use `.e2e.json` from the repository root |
 
-`DEFAULT_FAIL_MODE` does not override workflow policy. Output limits are injected using each provider's native field before accounting and transmission. See the [recovery runbook](docs/phase2-accounting.md) for S3 permissions, inspection APIs, corrections, and maintenance-window upgrades.
+`DEFAULT_FAIL_MODE` does not override workflow policy. Output limits are injected using each provider's native field before accounting and transmission. See the [recovery runbook](docs/phase2-accounting.md) for S3 permissions and corrections, and the [Phase 3 runbook](docs/phase3-controls.md#deployment-key-rings-and-re-encryption) for configuration preflight, batched re-encryption, key-retirement checks, and maintenance-window upgrades.
 
 ## Operations and deployment
 
@@ -575,7 +581,7 @@ The supplied Compose file is for local development. For a hosted deployment:
 - Fail-open replicas cannot coordinate budgets or fresh kill flags during storage outages.
 - Audit chains detect changes against a trusted chain state; they are not externally notarized and do not prevent a database administrator from rewriting all history.
 - Gemini has no provider billing reconciliation in v1.
-- New UTC monthly budgets must be provisioned explicitly.
+- One-off workflow budgets still require explicit provisioning; configure monthly templates for automatic renewal.
 - Client `retention_days` is stored metadata; automatic deletion of client history is not implemented.
 - Single-use approval consumption protects one attempt, not exactly-once execution of external operations.
 - Live provider and notification acceptance is still outstanding. The live client pilot is outside phases 1–4.
@@ -639,7 +645,7 @@ Record results in [acceptance evidence](docs/phase-exits.md). Sanitize live capt
 | Dashboard login fails | Run migrations and the bootstrap script; use the dashboard password rather than `ADMIN_TOKEN` |
 | `/v1/models` is empty or a model is rejected | Check the workflow allowlist, provider credential, and effective model price |
 | A native call is rejected before forwarding | Inspect its provider-shaped error and `x-gateway-error`; check mapping, budget, rate, and kill state |
-| First call in a new month is blocked | Create the workflow's budget for the current UTC month |
+| First call in a new month is blocked | Check that a monthly workflow template is enabled, or create a one-off current UTC budget |
 | Per-run limit trips too soon | Check the smallest configured cap and whether multiple executions share `X-Run-Id` |
 | Paused workflow still accepts a brief call | Kill state can take up to five seconds to propagate |
 | Action is denied immediately | Configure its action name and check strict-action policy and risk |
