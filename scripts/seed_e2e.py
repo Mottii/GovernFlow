@@ -69,10 +69,33 @@ async def main() -> None:
             "users",
             {"email": email, "password": password, "role": "operator", "client_id": client["id"]},
         )
+        admin_password = secrets.token_urlsafe(24)
+        admin_email = "acceptance-admin-" + suffix + "@example.test"
+        await create("users", {"email": admin_email, "password": admin_password, "role": "admin"})
+        policy_workflow = await create(
+            "workflows",
+            {
+                "client_id": client["id"],
+                "name": "Policy acceptance " + suffix,
+                "risk_class": "R1",
+                "policy": {"models": ["gpt-mock"], "per_run_micro": 10000},
+            },
+        )
+        await create(
+            "budgets",
+            {
+                "workflow_id": policy_workflow["id"],
+                "period": datetime.now(UTC).strftime("%Y-%m"),
+                "cap_micro": 1000000,
+            },
+        )
         path = Path(env.get("E2E_SEED_FILE", "/private/tmp/gas-e2e.json"))
         path.write_text(
             json.dumps(
                 {
+                    "admin_email": admin_email,
+                    "admin_password": admin_password,
+                    "policy_workflow_id": policy_workflow["id"],
                     "email": email,
                     "password": password,
                     "client_id": client["id"],
