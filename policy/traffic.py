@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.models import RateBucket
 from gateway.auth import AuthContext
 from gateway.errors import GatewayError
-from policy.loop import loop_policy, trip
+from policy.loop import loop_policy
 
 
 def allowed_models(auth: AuthContext) -> list[str]:
@@ -39,9 +39,6 @@ async def check_traffic(session: AsyncSession, auth: AuthContext, model: str) ->
     # The counter is shared by replicas and persists even if a later call fails.
     await session.commit()
     if accepted is None:
-        if loop_rpm <= limit:
-            await trip(session, auth.workflow_id, "loop_breaker")
-            await session.commit()
         raise GatewayError(
             429, "rate_limit_exceeded", "Workflow rate limit exceeded", retry_after=60 - now.second
         )

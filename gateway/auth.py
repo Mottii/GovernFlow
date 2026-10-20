@@ -3,11 +3,11 @@ from dataclasses import dataclass
 from typing import Annotated, Any
 
 from fastapi import Depends, Header
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.database import get_session
-from core.models import Client, VirtualKey, Workflow
+from core.database import agency_rls_enabled, get_session, set_agency_context
+from core.models import DEFAULT_AGENCY_ID, Agency, Client, VirtualKey, Workflow
 from core.security import virtual_key_hash
 from gateway.errors import GatewayError
 
@@ -19,6 +19,8 @@ class AuthContext:
     risk_class: str
     policy: dict[str, Any]
     key_prefix: str
+    policy_version: int = 0
+    agency_id: uuid.UUID = DEFAULT_AGENCY_ID
 
 
 async def authenticate_openai(
@@ -42,26 +44,45 @@ async def authenticate_anthropic(
 async def resolve_virtual_key(session: AsyncSession, key: str) -> AuthContext:
     if not key.startswith("gk_"):
         raise GatewayError(401, "invalid_api_key", "A valid virtual key is required")
+    if agency_rls_enabled():
+        agency_id = (
+            await session.execute(
+                text("SELECT public.governflow_key_agency(:digest)"),
+                {"digest": virtual_key_hash(key)},
+            )
+        ).scalar_one_or_none()
+        if agency_id is None:
+            raise GatewayError(401, "invalid_api_key", "A valid virtual key is required")
+        await set_agency_context(session, agency_id)
     row = (
         await session.execute(
             select(VirtualKey, Workflow, Client)
             .join(Workflow, VirtualKey.workflow_id == Workflow.id)
             .join(Client, Workflow.client_id == Client.id)
+            .join(Agency, Agency.id == Client.agency_id)
             .where(
                 VirtualKey.key_hash == virtual_key_hash(key),
                 VirtualKey.revoked_at.is_(None),
                 Workflow.status == "active",
                 Client.status == "active",
+                Agency.status == "active",
             )
         )
     ).one_or_none()
     if row is None:
         raise GatewayError(401, "invalid_api_key", "A valid virtual key is required")
     record, workflow, client = row
+    if agency_rls_enabled() and (workflow.policy_version == 0 or workflow.policy_review_required):
+        raise GatewayError(
+            503, "policy_unpublished", "An administrator must publish a usable policy"
+        )
+    await set_agency_context(session, client.agency_id)
     return AuthContext(
         client_id=client.id,
         workflow_id=workflow.id,
         risk_class=workflow.risk_class,
         policy=workflow.policy,
+        policy_version=workflow.policy_version,
         key_prefix=record.prefix,
+        agency_id=client.agency_id,
     )

@@ -1,4 +1,5 @@
 "use client";
+import AgencyControls from "../components/AgencyControls";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Activity,
@@ -39,6 +40,9 @@ type SpendRow = {
   name: string;
   risk_class: string;
   spent_micro: number;
+  estimated_micro: number;
+  estimated_calls: number;
+  recovery_pending: number;
   reserved_micro: number;
   cap_micro: number | null;
 };
@@ -114,6 +118,9 @@ type MonthlyReport = {
     cost_micro: number;
     calls: number;
     estimated_calls: number;
+    estimated_cost_micro: number;
+    corrected_calls: number;
+    recovery_pending: number;
     reserved_micro: number;
   };
   hours_saved: {
@@ -388,7 +395,11 @@ export default function Dashboard() {
           inference_key_id: fields.inference_key_id || null,
         });
       setModal(null);
-      setNotice("Saved successfully.");
+      setNotice(
+        modal === "workflow" && me?.role !== "admin"
+          ? "Workflow created as a draft. Ask an administrator to publish its policy in Governance before making calls."
+          : "Saved successfully.",
+      );
     });
   }
   const nav = [
@@ -399,6 +410,7 @@ export default function Dashboard() {
     { name: "Reconciliation", icon: Activity },
     { name: "Reports", icon: FileDown },
     { name: "Settings", icon: SlidersHorizontal },
+    { name: "Governance", icon: SlidersHorizontal },
   ];
   const workflowTable = (
     <div className="table-wrap">
@@ -429,6 +441,18 @@ export default function Dashboard() {
               </td>
               <td className="numeric">
                 {money(w.spent_micro)}
+                {w.estimated_calls > 0 && (
+                  <span className="muted">
+                    {" "}
+                    · {money(w.estimated_micro)} estimated
+                  </span>
+                )}
+                {w.recovery_pending > 0 && (
+                  <span className="muted">
+                    {" "}
+                    · {w.recovery_pending} recovery pending
+                  </span>
+                )}
                 {w.reserved_micro > 0 && (
                   <span className="cell-sub">
                     {money(w.reserved_micro)} reserved
@@ -605,7 +629,9 @@ export default function Dashboard() {
                         ? "Investigate limits and unexplained provider differences."
                         : tab === "Reconciliation"
                           ? "Compare the gateway with your dedicated provider accounts."
-                          : "Manage accounts, credentials, and provider mapping."}
+                          : tab === "Governance"
+                            ? "Shared budgets, reviewed policies, and credential versions."
+                            : "Manage accounts, credentials, and provider mapping."}
               </p>
             </div>
             <div className="filters">
@@ -1188,9 +1214,13 @@ export default function Dashboard() {
                           </table>
                         </div>
                         <div className="panel-foot">
-                          Totals follow charges settled in this UTC month.{" "}
-                          {report.totals.estimated_calls} calls have estimated
-                          charges.
+                          Totals follow the original UTC accounting period,
+                          including later corrections.{" "}
+                          {report.totals.estimated_calls} calls (
+                          {money(report.totals.estimated_cost_micro)}) remain
+                          estimated. {report.totals.corrected_calls} calls were
+                          corrected; {report.totals.recovery_pending} recovery
+                          entries await processing.
                         </div>
                       </section>
                       <section className="panel space-top">
@@ -1285,6 +1315,14 @@ export default function Dashboard() {
                     </>
                   )}
                 </>
+              )}
+              {tab === "Governance" && me && (
+                <AgencyControls
+                  clients={clients.filter((c) => !client || c.id === client)}
+                  workflows={shownWorkflows}
+                  period={period}
+                  role={me.role}
+                />
               )}
               {tab === "Settings" && (
                 <section className="settings-grid">

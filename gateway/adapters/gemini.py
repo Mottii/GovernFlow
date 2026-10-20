@@ -1,4 +1,5 @@
 import json
+import os
 from typing import Any
 
 from core.usage import Usage
@@ -49,6 +50,8 @@ class ContentStreamTracker:
 
     def feed(self, chunk: bytes) -> None:
         self._buffer.extend(chunk)
+        if len(self._buffer) > int(os.environ.get("MAX_TRACKER_BYTES", str(2 * 1024 * 1024))):
+            raise ValueError("Provider frame exceeds accounting buffer limit")
         if not self._sse:
             return
         while True:
@@ -67,6 +70,10 @@ class ContentStreamTracker:
                 self._observe(json.loads(data))
             except (ValueError, UnicodeDecodeError):
                 pass
+
+    @property
+    def partial_usage(self) -> Usage | None:
+        return self._usage
 
     @property
     def usage(self) -> Usage | None:

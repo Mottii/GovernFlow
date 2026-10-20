@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import hashlib
 import hmac
 import html
@@ -19,33 +18,35 @@ from core.models import Approval
 from gateway.errors import GatewayError
 
 
-def webhook_secret() -> bytes:
-    try:
-        value = base64.b64decode(os.environ.get("WEBHOOK_SIGNING_KEY", ""), validate=True)
-    except ValueError as exc:
-        raise GatewayError(503, "webhook_unavailable", "Webhook signing is not configured") from exc
-    if len(value) != 32:
-        raise GatewayError(503, "webhook_unavailable", "Webhook signing is not configured")
-    return value
+def signature(timestamp: str, body: bytes, key: bytes) -> str:
+    return hmac.digest(key, timestamp.encode() + b"." + body, hashlib.sha256).hex()
 
 
-def signature(timestamp: str, body: bytes) -> str:
-    return hmac.digest(webhook_secret(), timestamp.encode() + b"." + body, hashlib.sha256).hex()
-
-
-def verify_signature(timestamp: str, body: bytes, supplied: str) -> None:
+def verify_signature(timestamp: str, body: bytes, supplied: str, key: bytes) -> None:
     try:
         if abs(time.time() - int(timestamp)) > 300 or not hmac.compare_digest(
-            signature(timestamp, body), supplied
+            signature(timestamp, body, key), supplied
         ):
             raise ValueError("signature")
     except ValueError as exc:
         raise GatewayError(403, "invalid_webhook", "Webhook signature is invalid or stale") from exc
 
 
-async def email(record: Approval, action: dict[str, Any]) -> None:
+async def public_webhook_url(url: str) -> None:
+    import ipaddress
+    import socket
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit(url)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise RuntimeError("Webhook requires a public HTTPS URL")
+    addresses = await asyncio.to_thread(socket.getaddrinfo, parsed.hostname, parsed.port or 443)
+    if not addresses or any(not ipaddress.ip_address(a[4][0]).is_global for a in addresses):
+        raise RuntimeError("Webhook requires a public HTTPS address")
+
+
+async def email(record: Approval, action: dict[str, Any], recipient: str) -> None:
     host = os.environ.get("SMTP_HOST", "")
-    recipient = os.environ.get("APPROVAL_EMAIL_TO", "")
     sender = os.environ.get("SMTP_FROM", "")
     if not host or not recipient or not sender:
         raise RuntimeError("SMTP is not configured")
@@ -79,10 +80,8 @@ async def email(record: Approval, action: dict[str, Any]) -> None:
     await asyncio.to_thread(send)
 
 
-async def webhook(record: Approval, action: dict[str, Any]) -> None:
-    url = os.environ.get("APPROVAL_WEBHOOK_URL", "")
-    if not url:
-        raise RuntimeError("Approval webhook is not configured")
+async def webhook(record: Approval, action: dict[str, Any], url: str, key: bytes) -> None:
+    await public_webhook_url(url)
     timestamp = str(int(time.time()))
     body = json.dumps(
         {
@@ -105,7 +104,7 @@ async def webhook(record: Approval, action: dict[str, Any]) -> None:
             headers={
                 "content-type": "application/json",
                 "x-gas-timestamp": timestamp,
-                "x-gas-signature": signature(timestamp, body),
+                "x-gas-signature": signature(timestamp, body, key),
             },
         )
         response.raise_for_status()

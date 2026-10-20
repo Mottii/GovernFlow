@@ -3,18 +3,22 @@ from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import (
+    DDL,
     BigInteger,
     Boolean,
     CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     LargeBinary,
     Text,
     UniqueConstraint,
+    event,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -24,8 +28,33 @@ class Base(DeclarativeBase):
     pass
 
 
+DEFAULT_AGENCY_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
+
+
+class Agency(Base):
+    __tablename__ = "agencies"
+    __table_args__ = (CheckConstraint("status IN ('active','suspended')"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="active")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class Client(Base):
     __tablename__ = "clients"
+    __table_args__ = (UniqueConstraint("agency_id", "id"),)
+
+    agency_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agencies.id"),
+        nullable=False,
+        server_default=str(DEFAULT_AGENCY_ID),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
@@ -40,6 +69,13 @@ class Client(Base):
 
 class Workflow(Base):
     __tablename__ = "workflows"
+    agency_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agencies.id"),
+        nullable=False,
+        server_default=text("NULLIF(current_setting('governflow.agency_id', true), '')::uuid"),
+    )
+
     __table_args__ = (
         UniqueConstraint("client_id", "name"),
         CheckConstraint("risk_class IN ('R0','R1','R2','R3')"),
@@ -55,10 +91,18 @@ class Workflow(Base):
     risk_class: Mapped[str] = mapped_column(Text, nullable=False)
     policy: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default="{}")
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="active")
+    policy_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    policy_review_required: Mapped[bool] = mapped_column(Boolean, server_default="false")
 
 
 class VirtualKey(Base):
     __tablename__ = "virtual_keys"
+    agency_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agencies.id"),
+        nullable=False,
+        server_default=text("NULLIF(current_setting('governflow.agency_id', true), '')::uuid"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
@@ -76,6 +120,13 @@ class VirtualKey(Base):
 
 class ProviderCredential(Base):
     __tablename__ = "provider_credentials"
+    agency_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agencies.id"),
+        nullable=False,
+        server_default=text("NULLIF(current_setting('governflow.agency_id', true), '')::uuid"),
+    )
+
     __table_args__ = (
         UniqueConstraint("client_id", "provider", "label"),
         CheckConstraint("provider IN ('openai','anthropic','gemini')"),
@@ -91,10 +142,19 @@ class ProviderCredential(Base):
     label: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
     ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    encryption_key_id: Mapped[str | None] = mapped_column(Text)
+    active_version_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
 
 
 class Budget(Base):
     __tablename__ = "budgets"
+    agency_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agencies.id"),
+        nullable=False,
+        server_default=text("NULLIF(current_setting('governflow.agency_id', true), '')::uuid"),
+    )
+
     __table_args__ = (
         UniqueConstraint("workflow_id", "period"),
         CheckConstraint("spent_micro >= 0 AND reserved_micro >= 0"),
@@ -108,12 +168,21 @@ class Budget(Base):
     )
     period: Mapped[str] = mapped_column(Text, nullable=False)
     cap_micro: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, server_default="1")
+    template_revision_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     spent_micro: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
     reserved_micro: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
 
 
 class Run(Base):
     __tablename__ = "runs"
+    agency_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agencies.id"),
+        nullable=False,
+        server_default=text("NULLIF(current_setting('governflow.agency_id', true), '')::uuid"),
+    )
+
     __table_args__ = (
         Index("runs_workflow_external_idx", "workflow_id", "external_run_id", unique=True),
         CheckConstraint("reserved_micro >= 0", name="runs_reserved_nonnegative"),
@@ -129,6 +198,9 @@ class Run(Base):
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    stopped: Mapped[bool] = mapped_column(Boolean, server_default="false")
+    stop_reason: Mapped[str | None] = mapped_column(Text)
+    stop_revision: Mapped[int] = mapped_column(Integer, server_default="0")
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="running")
     step_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
@@ -141,6 +213,13 @@ class Run(Base):
 
 class Reservation(Base):
     __tablename__ = "reservations"
+    agency_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agencies.id"),
+        nullable=False,
+        server_default=text("NULLIF(current_setting('governflow.agency_id', true), '')::uuid"),
+    )
+
     __table_args__ = (
         CheckConstraint("est_micro > 0"),
         CheckConstraint("status IN ('reserved','settled','released')"),
@@ -156,6 +235,7 @@ class Reservation(Base):
     run_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("runs.id"), nullable=False
     )
+    client_budget_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     est_micro: Mapped[int] = mapped_column(BigInteger, nullable=False)
     actual_micro: Mapped[int | None] = mapped_column(BigInteger)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="reserved")
@@ -167,6 +247,13 @@ class Reservation(Base):
 
 class Event(Base):
     __tablename__ = "events"
+    agency_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agencies.id"),
+        nullable=False,
+        server_default=text("NULLIF(current_setting('governflow.agency_id', true), '')::uuid"),
+    )
+
     __table_args__ = (Index("events_client_id_idx", "client_id", "id"),)
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -189,6 +276,12 @@ class Event(Base):
 class KillFlag(Base):
     __tablename__ = "kill_flags"
     __table_args__ = (CheckConstraint("scope IN ('global','client','workflow')"),)
+
+    agency_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agencies.id")
+    )
+    client_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    workflow_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
 
     scope: Mapped[str] = mapped_column(Text, primary_key=True)
     scope_id: Mapped[str] = mapped_column(Text, primary_key=True, server_default="")
@@ -225,6 +318,13 @@ class Price(Base):
 
 class Approval(Base):
     __tablename__ = "approvals"
+    agency_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agencies.id"),
+        nullable=False,
+        server_default=text("NULLIF(current_setting('governflow.agency_id', true), '')::uuid"),
+    )
+
     __table_args__ = (
         CheckConstraint("status IN ('pending','approved','denied','expired')"),
         CheckConstraint("timeout_outcome IN ('allow','deny')", name="approval_timeout_outcome"),
@@ -237,6 +337,10 @@ class Approval(Base):
         UUID(as_uuid=True), ForeignKey("workflows.id"), nullable=False
     )
     run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    policy_version: Mapped[int] = mapped_column(Integer, server_default="0")
+    matched_rules: Mapped[list[str]] = mapped_column(JSONB, server_default="[]")
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    encryption_key_id: Mapped[str | None] = mapped_column(Text)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     content_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary)
     content_nonce: Mapped[bytes | None] = mapped_column(LargeBinary)
@@ -255,6 +359,13 @@ class Approval(Base):
 
 class RateBucket(Base):
     __tablename__ = "rate_buckets"
+    agency_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agencies.id"),
+        nullable=False,
+        server_default=text("NULLIF(current_setting('governflow.agency_id', true), '')::uuid"),
+    )
+
     __table_args__ = (CheckConstraint("count > 0"),)
 
     workflow_id: Mapped[uuid.UUID] = mapped_column(
@@ -266,6 +377,12 @@ class RateBucket(Base):
 
 class Alert(Base):
     __tablename__ = "alerts"
+    agency_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agencies.id"),
+        nullable=False,
+        server_default=text("NULLIF(current_setting('governflow.agency_id', true), '')::uuid"),
+    )
 
     dedup_key: Mapped[str | None] = mapped_column(Text, unique=True)
 
@@ -285,12 +402,32 @@ class Alert(Base):
 
 class ReplayReceipt(Base):
     __tablename__ = "replay_receipts"
+    agency_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agencies.id"),
+        nullable=False,
+        server_default=text("NULLIF(current_setting('governflow.agency_id', true), '')::uuid"),
+    )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
 
 
 class Notification(Base):
     __tablename__ = "notifications"
-    __table_args__ = (UniqueConstraint("approval_id", "channel"),)
+    agency_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agencies.id"),
+        nullable=False,
+        server_default=text("NULLIF(current_setting('governflow.agency_id', true), '')::uuid"),
+    )
+
+    __table_args__ = (
+        UniqueConstraint("approval_id", "destination_id"),
+        ForeignKeyConstraint(
+            ["agency_id", "destination_id"],
+            ["integration_destinations.agency_id", "integration_destinations.id"],
+        ),
+    )
+    destination_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     approval_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("approvals.id"))
@@ -304,6 +441,12 @@ class Notification(Base):
 
 class WebhookReceipt(Base):
     __tablename__ = "webhook_receipts"
+    agency_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agencies.id"),
+        nullable=False,
+        server_default=text("NULLIF(current_setting('governflow.agency_id', true), '')::uuid"),
+    )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     received_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -312,6 +455,13 @@ class WebhookReceipt(Base):
 
 class ProviderAccount(Base):
     __tablename__ = "provider_accounts"
+    agency_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agencies.id"),
+        nullable=False,
+        server_default=text("NULLIF(current_setting('governflow.agency_id', true), '')::uuid"),
+    )
+
     __table_args__ = (
         UniqueConstraint("provider", "external_id"),
         CheckConstraint("provider IN ('openai','anthropic')"),
@@ -323,11 +473,19 @@ class ProviderAccount(Base):
     external_id: Mapped[str] = mapped_column(Text, nullable=False)
     credential_label: Mapped[str] = mapped_column(Text, server_default="default")
     inference_key_id: Mapped[str | None] = mapped_column(Text)
+    validated_credential_version_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ReconcileSnapshot(Base):
     __tablename__ = "reconcile_snapshots"
+    agency_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agencies.id"),
+        nullable=False,
+        server_default=text("NULLIF(current_setting('governflow.agency_id', true), '')::uuid"),
+    )
+
     client_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("clients.id"), primary_key=True
     )
@@ -345,6 +503,13 @@ class ReconcileSnapshot(Base):
 
 class ReconcileJob(Base):
     __tablename__ = "reconcile_jobs"
+    agency_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agencies.id"),
+        nullable=False,
+        server_default=text("NULLIF(current_setting('governflow.agency_id', true), '')::uuid"),
+    )
+
     client_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("clients.id"), primary_key=True
     )
@@ -376,6 +541,12 @@ class AdminSession(Base):
     __tablename__ = "admin_sessions"
     token_hash: Mapped[bytes] = mapped_column(LargeBinary, primary_key=True)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
+    agency_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agencies.id"),
+        nullable=False,
+        server_default=str(DEFAULT_AGENCY_ID),
+    )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -389,6 +560,13 @@ class LoginBucket(Base):
 
 class MonthlyMetric(Base):
     __tablename__ = "monthly_metrics"
+    agency_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agencies.id"),
+        nullable=False,
+        server_default=text("NULLIF(current_setting('governflow.agency_id', true), '')::uuid"),
+    )
+
     __table_args__ = (
         CheckConstraint("minutes_saved >= 0"),
         CheckConstraint("basis IN ('measured','estimate')"),
@@ -402,3 +580,586 @@ class MonthlyMetric(Base):
     note: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
     updated_by: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AgencyMembership(Base):
+    __tablename__ = "agency_memberships"
+    __table_args__ = (CheckConstraint("role IN ('admin','operator','approver','viewer')"),)
+
+    agency_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agencies.id"), primary_key=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), primary_key=True
+    )
+    role: Mapped[str] = mapped_column(Text, nullable=False)
+    all_clients: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+
+
+class ClientAssignment(Base):
+    __tablename__ = "client_assignments"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["agency_id", "user_id"],
+            ["agency_memberships.agency_id", "agency_memberships.user_id"],
+        ),
+        ForeignKeyConstraint(["agency_id", "client_id"], ["clients.agency_id", "clients.id"]),
+    )
+
+    agency_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    client_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+
+
+class ExternalLoginIdentity(Base):
+    __tablename__ = "external_login_identities"
+    __table_args__ = (
+        Index(
+            "telegram_one_account",
+            "user_id",
+            unique=True,
+            postgresql_where=text("issuer='telegram'"),
+        ),
+    )
+
+    issuer: Mapped[str] = mapped_column(Text, primary_key=True)
+    subject: Mapped[str] = mapped_column(Text, primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+
+
+class ReviewerGroup(Base):
+    __tablename__ = "reviewer_groups"
+    __table_args__ = (
+        UniqueConstraint("agency_id", "id"),
+        UniqueConstraint("agency_id", "client_id", "id"),
+        UniqueConstraint("client_id", "name"),
+        ForeignKeyConstraint(["agency_id", "client_id"], ["clients.agency_id", "clients.id"]),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    agency_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("agencies.id"))
+    client_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    name: Mapped[str] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+
+
+class ReviewerGroupMember(Base):
+    __tablename__ = "reviewer_group_members"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["agency_id", "group_id"], ["reviewer_groups.agency_id", "reviewer_groups.id"]
+        ),
+        ForeignKeyConstraint(
+            ["agency_id", "user_id"], ["agency_memberships.agency_id", "agency_memberships.user_id"]
+        ),
+    )
+    agency_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    group_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+
+
+class ReviewerAssignment(Base):
+    __tablename__ = "reviewer_assignments"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["agency_id", "client_id", "group_id"],
+            ["reviewer_groups.agency_id", "reviewer_groups.client_id", "reviewer_groups.id"],
+        ),
+        ForeignKeyConstraint(
+            ["agency_id", "client_id", "workflow_id"],
+            ["workflows.agency_id", "workflows.client_id", "workflows.id"],
+        ),
+        Index(
+            "reviewer_client_scope",
+            "group_id",
+            unique=True,
+            postgresql_where=text("workflow_id IS NULL"),
+        ),
+        Index(
+            "reviewer_workflow_scope",
+            "group_id",
+            "workflow_id",
+            unique=True,
+            postgresql_where=text("workflow_id IS NOT NULL"),
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    agency_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    client_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    group_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    workflow_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+
+
+class IntegrationDestination(Base):
+    __tablename__ = "integration_destinations"
+    __table_args__ = (
+        UniqueConstraint("agency_id", "id"),
+        UniqueConstraint("agency_id", "legacy_source"),
+        ForeignKeyConstraint(["agency_id", "client_id"], ["clients.agency_id", "clients.id"]),
+        ForeignKeyConstraint(
+            ["agency_id", "client_id", "workflow_id"],
+            ["workflows.agency_id", "workflows.client_id", "workflows.id"],
+        ),
+        ForeignKeyConstraint(
+            ["agency_id", "client_id", "group_id"],
+            ["reviewer_groups.agency_id", "reviewer_groups.client_id", "reviewer_groups.id"],
+        ),
+        CheckConstraint("channel IN ('telegram','email','webhook')"),
+        CheckConstraint("(workflow_id IS NULL AND group_id IS NULL) OR client_id IS NOT NULL"),
+        CheckConstraint(
+            "NOT enabled OR (client_id IS NOT NULL AND "
+            "((channel IN ('email','telegram') AND group_id IS NOT NULL) OR "
+            "(channel='webhook' AND credential_hash IS NOT NULL AND "
+            "secret_ciphertext IS NOT NULL AND secret_nonce IS NOT NULL AND "
+            "service_identity IS NOT NULL)))"
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    agency_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("agencies.id"))
+    client_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    workflow_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    group_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    name: Mapped[str] = mapped_column(Text)
+    channel: Mapped[str] = mapped_column(Text)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    config: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, server_default="{}")
+    legacy_source: Mapped[str | None] = mapped_column(Text)
+    service_identity: Mapped[str | None] = mapped_column(Text)
+    credential_hash: Mapped[bytes | None] = mapped_column(LargeBinary)
+    encryption_key_id: Mapped[str | None] = mapped_column(Text)
+    secret_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary)
+    secret_nonce: Mapped[bytes | None] = mapped_column(LargeBinary)
+
+
+class TelegramLinkChallenge(Base):
+    __tablename__ = "telegram_link_challenges"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["agency_id", "user_id"], ["agency_memberships.agency_id", "agency_memberships.user_id"]
+        ),
+    )
+    token_hash: Mapped[bytes] = mapped_column(LargeBinary, primary_key=True)
+    agency_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AgencyPrice(Base):
+    __tablename__ = "agency_prices"
+    agency_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agencies.id"), primary_key=True
+    )
+    provider: Mapped[str] = mapped_column(Text, primary_key=True)
+    model: Mapped[str] = mapped_column(Text, primary_key=True)
+    effective_from: Mapped[date] = mapped_column(Date, primary_key=True)
+    rates: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    updated_by: Mapped[str] = mapped_column(Text)
+
+
+class ProviderCall(Base):
+    __tablename__ = "provider_calls"
+    __table_args__ = (
+        UniqueConstraint("agency_id", "id"),
+        UniqueConstraint("reservation_id"),
+        ForeignKeyConstraint(["agency_id", "client_id"], ["clients.agency_id", "clients.id"]),
+        ForeignKeyConstraint(
+            ["agency_id", "client_id", "workflow_id"],
+            ["workflows.agency_id", "workflows.client_id", "workflows.id"],
+        ),
+        ForeignKeyConstraint(
+            ["agency_id", "reservation_id", "budget_id", "run_id"],
+            [
+                "reservations.agency_id",
+                "reservations.id",
+                "reservations.budget_id",
+                "reservations.run_id",
+            ],
+        ),
+        ForeignKeyConstraint(
+            ["agency_id", "workflow_id", "budget_id"],
+            ["budgets.agency_id", "budgets.workflow_id", "budgets.id"],
+        ),
+        ForeignKeyConstraint(
+            ["agency_id", "workflow_id", "run_id"],
+            ["runs.agency_id", "runs.workflow_id", "runs.id"],
+        ),
+        CheckConstraint(
+            "state IN ('reserved','dispatched','settled_estimated','settled_measured','voided')"
+        ),
+        CheckConstraint("estimate_micro > 0 AND charged_micro >= 0 AND revision >= 0"),
+        Index("calls_lease_idx", "state", "lease_until"),
+        Index("calls_scope_created_idx", "agency_id", "client_id", "created_at", "id"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    agency_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("agencies.id"))
+    client_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    workflow_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    reservation_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    client_budget_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    policy_version: Mapped[int] = mapped_column(Integer, server_default="0")
+    credential_version_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    budget_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    period: Mapped[str] = mapped_column(Text)
+    provider: Mapped[str | None] = mapped_column(Text)
+    model: Mapped[str | None] = mapped_column(Text)
+    state: Mapped[str] = mapped_column(Text, default="reserved", server_default="reserved")
+    estimate_micro: Mapped[int] = mapped_column(BigInteger)
+    charged_micro: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    legacy_baseline_micro: Mapped[int | None] = mapped_column(BigInteger)
+    revision: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    price_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, server_default="{}")
+    usage: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    provider_request_id: Mapped[str | None] = mapped_column(Text)
+    provenance: Mapped[str] = mapped_column(Text, default="gateway", server_default="gateway")
+    uncertainty_reason: Mapped[str | None] = mapped_column(Text)
+    dispatch_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_until: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    lease_owner: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ChargeEntry(Base):
+    __tablename__ = "charge_entries"
+    __table_args__ = (
+        UniqueConstraint("agency_id", "evidence_id"),
+        UniqueConstraint("call_id", "revision"),
+        ForeignKeyConstraint(
+            ["agency_id", "call_id"], ["provider_calls.agency_id", "provider_calls.id"]
+        ),
+        CheckConstraint("amount_micro >= 0 AND revision > 0"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    agency_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    call_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    evidence_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    revision: Mapped[int] = mapped_column(Integer)
+    delta_micro: Mapped[int] = mapped_column(BigInteger)
+    amount_micro: Mapped[int] = mapped_column(BigInteger)
+    kind: Mapped[str] = mapped_column(Text)
+    evidence_ref: Mapped[str | None] = mapped_column(Text)
+    actor: Mapped[str] = mapped_column(Text)
+    reason: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AccountingReceipt(Base):
+    __tablename__ = "accounting_receipts"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["agency_id", "call_id"], ["provider_calls.agency_id", "provider_calls.id"]
+        ),
+    )
+    agency_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    evidence_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    call_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    checksum: Mapped[bytes] = mapped_column(LargeBinary)
+    disposition: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AccountingRecovery(Base):
+    __tablename__ = "accounting_recovery"
+    __table_args__ = (
+        ForeignKeyConstraint(["agency_id", "client_id"], ["clients.agency_id", "clients.id"]),
+        CheckConstraint("status IN ('pending','running','retry','quarantined','complete')"),
+        Index("accounting_recovery_due_idx", "status", "next_attempt"),
+    )
+    agency_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    evidence_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    client_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    call_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    checksum: Mapped[bytes] = mapped_column(LargeBinary)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(Text, default="pending", server_default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    next_attempt: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_owner: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ClientBudget(Base):
+    __tablename__ = "client_budgets"
+    __table_args__ = (
+        UniqueConstraint("agency_id", "id"),
+        UniqueConstraint("client_id", "period"),
+        ForeignKeyConstraint(["agency_id", "client_id"], ["clients.agency_id", "clients.id"]),
+        CheckConstraint(
+            "spent_micro>=0 AND reserved_micro>=0 AND (cap_micro IS NULL OR cap_micro>=0)"
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    agency_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    client_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    period: Mapped[str] = mapped_column(Text)
+    cap_micro: Mapped[int | None] = mapped_column(BigInteger)
+    spent_micro: Mapped[int] = mapped_column(BigInteger, server_default="0")
+    reserved_micro: Mapped[int] = mapped_column(BigInteger, server_default="0")
+    revision: Mapped[int] = mapped_column(Integer, server_default="1")
+    template_revision_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+
+
+class BudgetTemplate(Base):
+    __tablename__ = "budget_templates"
+    __table_args__ = (
+        UniqueConstraint("agency_id", "id"),
+        UniqueConstraint("agency_id", "scope", "scope_id", "revision"),
+        ForeignKeyConstraint(["agency_id", "client_id"], ["clients.agency_id", "clients.id"]),
+        ForeignKeyConstraint(["agency_id", "workflow_id"], ["workflows.agency_id", "workflows.id"]),
+        CheckConstraint("scope IN ('client','workflow') AND cap_micro>=0 AND revision>0"),
+        CheckConstraint(
+            "(scope='client' AND workflow_id IS NULL AND scope_id=client_id) OR "
+            "(scope='workflow' AND workflow_id IS NOT NULL AND scope_id=workflow_id)"
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    agency_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    client_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    workflow_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    scope: Mapped[str] = mapped_column(Text)
+    scope_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    revision: Mapped[int] = mapped_column(Integer)
+    cap_micro: Mapped[int] = mapped_column(BigInteger)
+    effective_period: Mapped[str] = mapped_column(Text)
+    enabled: Mapped[bool] = mapped_column(Boolean)
+    actor: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PolicyRevision(Base):
+    __tablename__ = "policy_revisions"
+    __table_args__ = (
+        UniqueConstraint("agency_id", "id"),
+        UniqueConstraint("workflow_id", "version"),
+        ForeignKeyConstraint(["agency_id", "workflow_id"], ["workflows.agency_id", "workflows.id"]),
+        ForeignKeyConstraint(["agency_id", "client_id"], ["clients.agency_id", "clients.id"]),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    agency_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    client_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    workflow_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    version: Mapped[int] = mapped_column(Integer)
+    risk_class: Mapped[str] = mapped_column(Text)
+    policy: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    legacy_source: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    content_hash: Mapped[bytes] = mapped_column(LargeBinary)
+    actor: Mapped[str] = mapped_column(Text)
+    source_version: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class CredentialVersion(Base):
+    __tablename__ = "credential_versions"
+    __table_args__ = (
+        UniqueConstraint("agency_id", "id"),
+        UniqueConstraint("credential_id", "version"),
+        ForeignKeyConstraint(
+            ["agency_id", "credential_id"],
+            ["provider_credentials.agency_id", "provider_credentials.id"],
+        ),
+        CheckConstraint("state IN ('staged','active','retired')"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    agency_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    credential_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    version: Mapped[int] = mapped_column(Integer)
+    state: Mapped[str] = mapped_column(Text)
+    ciphertext: Mapped[bytes] = mapped_column(LargeBinary)
+    nonce: Mapped[bytes] = mapped_column(LargeBinary)
+    encryption_key_id: Mapped[str | None] = mapped_column(Text)
+    actor: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AdministrativeEvent(Base):
+    __tablename__ = "administrative_events"
+    __table_args__ = (Index("administrative_events_agency_sequence", "agency_id", "id"),)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    agency_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("agencies.id"))
+    actor: Mapped[str] = mapped_column(Text)
+    resource: Mapped[str] = mapped_column(Text)
+    resource_id: Mapped[str] = mapped_column(Text)
+    action: Mapped[str] = mapped_column(Text)
+    details: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    previous_hash: Mapped[bytes] = mapped_column(LargeBinary)
+    hash: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+# Composite ownership constraints supplement the existing stable primary keys.
+from core.ownership import DERIVE_FUNCTION, PARENTS, SECONDARY, trigger_sql  # noqa: E402
+
+for _name in ("workflows", "budgets", "runs", "approvals"):
+    Base.metadata.tables[_name].append_constraint(UniqueConstraint("agency_id", "id"))
+for _name, (_parent, _field) in PARENTS.items():
+    _table = Base.metadata.tables[_name]
+    for _target, _column in [(_parent, _field), *SECONDARY.get(_name, [])]:
+        _table.append_constraint(
+            ForeignKeyConstraint(
+                ["agency_id", _column],
+                [f"{_target}.agency_id", f"{_target}.id"],
+                name=f"{_name}_{_column}_agency_fk",
+            )
+        )
+# Alembic installs a frozen copy of this DDL; create_all is for disposable test databases.
+event.listen(
+    Base.metadata,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
+        DERIVE_FUNCTION.replace("%", "%%")
+    ),
+)
+for _name, (_parent, _field) in PARENTS.items():
+    event.listen(
+        Base.metadata,
+        "after_create",
+        DDL(  # type: ignore[no-untyped-call]
+            trigger_sql(_name, _parent, _field)
+        ),
+    )
+
+for _parent, _field in (("clients", "client_id"), ("workflows", "workflow_id")):
+    Base.metadata.tables["kill_flags"].append_constraint(
+        ForeignKeyConstraint(["agency_id", _field], [f"{_parent}.agency_id", f"{_parent}.id"])
+    )
+event.listen(
+    Base.metadata,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
+        """CREATE OR REPLACE FUNCTION governflow_kill_owner() RETURNS trigger LANGUAGE plpgsql
+        SET search_path=pg_catalog, public AS $$ BEGIN
+        IF NEW.scope='client' THEN
+            NEW.client_id := NEW.scope_id::uuid;
+            SELECT agency_id INTO NEW.agency_id FROM public.clients WHERE id=NEW.client_id;
+        ELSIF NEW.scope='workflow' THEN
+            NEW.workflow_id := NEW.scope_id::uuid;
+            SELECT agency_id INTO NEW.agency_id FROM public.workflows WHERE id=NEW.workflow_id;
+        END IF;
+        RETURN NEW; END $$"""
+    ),
+)
+event.listen(
+    Base.metadata,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
+        "CREATE TRIGGER kill_owner BEFORE INSERT OR UPDATE ON kill_flags "
+        "FOR EACH ROW EXECUTE FUNCTION governflow_kill_owner()"
+    ),
+)
+
+Base.metadata.tables["workflows"].append_constraint(
+    UniqueConstraint("agency_id", "client_id", "id")
+)
+
+Base.metadata.tables["reservations"].append_constraint(
+    UniqueConstraint("agency_id", "id", "budget_id", "run_id")
+)
+
+from core.accounting_ddl import IMMUTABLE_FUNCTION  # noqa: E402
+
+event.listen(Base.metadata, "after_create", DDL(IMMUTABLE_FUNCTION))  # type: ignore[no-untyped-call]
+for _name in ("charge_entries", "accounting_receipts"):
+    event.listen(
+        Base.metadata,
+        "after_create",
+        DDL(  # type: ignore[no-untyped-call]
+            f"CREATE TRIGGER {_name}_immutable BEFORE UPDATE OR DELETE ON {_name} "
+            "FOR EACH ROW EXECUTE FUNCTION public.accounting_immutable()"
+        ),
+    )
+
+for _name in ("budgets", "runs"):
+    Base.metadata.tables[_name].append_constraint(
+        UniqueConstraint("agency_id", "workflow_id", "id")
+    )
+
+for _name in ("client_budgets", "budget_templates", "policy_revisions", "administrative_events"):
+    if _name != "client_budgets":
+        event.listen(
+            Base.metadata,
+            "after_create",
+            DDL(  # type: ignore[no-untyped-call]
+                f"CREATE TRIGGER {_name}_immutable BEFORE UPDATE OR DELETE ON {_name} "
+                "FOR EACH ROW EXECUTE FUNCTION public.accounting_immutable()"
+            ),
+        )
+for _name in ("reservations", "provider_calls"):
+    Base.metadata.tables[_name].append_constraint(
+        ForeignKeyConstraint(
+            ["agency_id", "client_budget_id"], ["client_budgets.agency_id", "client_budgets.id"]
+        )
+    )
+Base.metadata.tables["provider_credentials"].append_constraint(UniqueConstraint("agency_id", "id"))
+Base.metadata.tables["client_budgets"].append_constraint(
+    UniqueConstraint("agency_id", "client_id", "period", "id")
+)
+Base.metadata.tables["provider_calls"].append_constraint(
+    ForeignKeyConstraint(
+        ["agency_id", "client_id", "period", "client_budget_id"],
+        [
+            "client_budgets.agency_id",
+            "client_budgets.client_id",
+            "client_budgets.period",
+            "client_budgets.id",
+        ],
+    )
+)
+
+
+class DeploymentKey(Base):
+    __tablename__ = "deployment_keys"
+    kind: Mapped[str] = mapped_column(Text, primary_key=True)
+    key_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    fingerprint: Mapped[str] = mapped_column(Text)
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    verify_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+from core.version_ddl import GUARD, TRIGGER  # noqa: E402
+
+event.listen(Base.metadata, "after_create", DDL(GUARD))  # type: ignore[no-untyped-call]
+event.listen(Base.metadata, "after_create", DDL(TRIGGER))  # type: ignore[no-untyped-call]
+
+Base.metadata.tables["credential_versions"].append_constraint(
+    UniqueConstraint("agency_id", "credential_id", "id")
+)
+Base.metadata.tables["provider_credentials"].append_constraint(
+    ForeignKeyConstraint(
+        ["agency_id", "id", "active_version_id"],
+        [
+            "credential_versions.agency_id",
+            "credential_versions.credential_id",
+            "credential_versions.id",
+        ],
+        use_alter=True,
+        name="credential_active_version_fk",
+    )
+)
+for _name in ("policy_revisions", "budget_templates"):
+    Base.metadata.tables[_name].append_constraint(
+        ForeignKeyConstraint(
+            ["agency_id", "client_id", "workflow_id"],
+            ["workflows.agency_id", "workflows.client_id", "workflows.id"],
+        )
+    )
+
+Index(
+    "credential_one_active_version",
+    CredentialVersion.credential_id,
+    unique=True,
+    postgresql_where=text("state='active'"),
+)
+Base.metadata.tables["provider_calls"].append_constraint(
+    ForeignKeyConstraint(
+        ["agency_id", "credential_version_id"],
+        ["credential_versions.agency_id", "credential_versions.id"],
+    )
+)

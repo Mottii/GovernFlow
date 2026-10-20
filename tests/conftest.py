@@ -6,20 +6,53 @@ from types import SimpleNamespace
 import httpx
 import pytest
 import pytest_asyncio
+from sqlalchemy import DDL, event
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from core.database import get_session
-from core.models import Base, Budget, Client, Price, ProviderCredential, VirtualKey, Workflow
+from core.models import (
+    Agency,
+    Base,
+    Budget,
+    Client,
+    Price,
+    ProviderCredential,
+    VirtualKey,
+    Workflow,
+)
 from core.security import encrypt_provider_key, virtual_key_hash
 from gateway.app import app
+
+# create_all is deliberately limited to tests; release installs use Alembic's backfill.
+event.listen(
+    Agency.__table__,
+    "after_create",
+    DDL(
+        "INSERT INTO agencies (id, name) VALUES "
+        "('00000000-0000-0000-0000-000000000001', 'Default agency')"
+    ),
+)
+
+
+@pytest.fixture(autouse=True)
+def metadata_database_auth(monkeypatch):
+    # create_all intentionally omits Alembic's SECURITY DEFINER auth functions.
+    monkeypatch.setenv("ENFORCE_AGENCY_RLS", "false")
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def gateway_runtime(metadata_database_auth, monkeypatch, tmp_path):
+    monkeypatch.setenv("REPLAY_QUEUE_PATH", str(tmp_path / "runtime.sqlite3"))
+    async with app.router.lifespan_context(app):
+        yield
 
 
 @pytest_asyncio.fixture
 async def governed(monkeypatch: pytest.MonkeyPatch, tmp_path):
-    monkeypatch.setenv("REPLAY_QUEUE_PATH", str(tmp_path / "replay.sqlite3"))
-    from gateway.outage import _cache
+    from gateway.outage import _allowances, _cache
 
     _cache.clear()
+    _allowances.clear()
     url = os.environ.get("APP_TEST_DATABASE_URL")
     if not url:
         pytest.skip("APP_TEST_DATABASE_URL is required")
@@ -98,9 +131,11 @@ async def governed(monkeypatch: pytest.MonkeyPatch, tmp_path):
     admin_app.dependency_overrides[get_session] = test_session
     app.dependency_overrides[get_session] = test_session
     try:
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://gateway.test"
-        ) as http:
+        async with (
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://gateway.test"
+            ) as http,
+        ):
             yield SimpleNamespace(http=http, factory=factory, a=tenants[0], b=tenants[1])
     finally:
         app.dependency_overrides.clear()
@@ -108,3 +143,56 @@ async def governed(monkeypatch: pytest.MonkeyPatch, tmp_path):
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)
         await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def review_team(governed):
+    from admin_api.app import app as admin_app
+
+    headers = {"authorization": "Bearer test-admin"}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=admin_app), base_url="http://admin"
+    ) as admin:
+        email = "reviewer@client-a.test"
+        result = await admin.post(
+            "/admin/users",
+            headers=headers,
+            json={
+                "email": email,
+                "password": "review acceptance password",
+                "role": "approver",
+                "client_id": str(governed.a.client.id),
+            },
+        )
+        assert result.status_code == 201, result.text
+        user_id = result.json()["id"]
+        login = await admin.post(
+            "/admin/auth/login", json={"email": email, "password": "review acceptance password"}
+        )
+        actor = {"authorization": "Bearer " + login.json()["token"]}
+        group = await admin.post(
+            "/admin/reviewer-groups",
+            headers=headers,
+            json={
+                "client_id": str(governed.a.client.id),
+                "name": "Reviewers",
+                "user_ids": [user_id],
+            },
+        )
+        assert group.status_code == 201, group.text
+        group_id = group.json()["id"]
+        assigned = await admin.put(
+            f"/admin/reviewer-groups/{group_id}/assignments",
+            headers=headers,
+            json={"workflow_ids": [str(governed.a.workflow.id)]},
+        )
+        assert assigned.status_code == 200, assigned.text
+        yield SimpleNamespace(
+            admin=admin,
+            headers=headers,
+            actor=actor,
+            email=email,
+            user_id=user_id,
+            group_id=group_id,
+            client_id=str(governed.a.client.id),
+        )

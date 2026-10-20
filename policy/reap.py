@@ -1,59 +1,111 @@
-"""Release reservations left by interrupted gateway processes."""
+"""Void undispatched reservations and conservatively charge expired dispatches."""
 
 import asyncio
+import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from audit.chain import AuditEventInput, append_event
-from core.database import session_factory
-from core.models import Budget, Reservation, Run, Workflow
+from core.database import agency_sessions
+from core.models import Reservation
 
 
 async def reap_stale(session: AsyncSession, before: datetime, limit: int = 100) -> int:
-    rows = (
-        await session.execute(
-            select(Reservation, Workflow.client_id)
-            .join(Budget, Reservation.budget_id == Budget.id)
-            .join(Workflow, Budget.workflow_id == Workflow.id)
-            .where(Reservation.status == "reserved", Reservation.created_at < before)
-            .order_by(Reservation.created_at, Reservation.id)
-            .limit(limit)
-            .with_for_update(of=Reservation, skip_locked=True)
+    from core.models import ProviderCall
+    from policy.accounting import Evidence, apply, database_now, locked_call
+
+    # Metadata-created and historical reservations may not have a call yet.
+    legacy = (
+        (
+            await session.execute(
+                select(Reservation.id)
+                .outerjoin(ProviderCall, ProviderCall.reservation_id == Reservation.id)
+                .where(
+                    Reservation.status == "reserved",
+                    Reservation.created_at < before,
+                    ProviderCall.id.is_(None),
+                )
+                .limit(limit)
+            )
         )
-    ).all()
-    for record, client_id in rows:
-        await session.execute(
-            update(Budget)
-            .where(Budget.id == record.budget_id)
-            .values(reserved_micro=Budget.reserved_micro - record.est_micro)
-        )
-        await session.execute(
-            update(Run)
-            .where(Run.id == record.run_id)
-            .values(reserved_micro=Run.reserved_micro - record.est_micro)
-        )
-        record.status = "released"
-        record.settled_at = datetime.now(UTC)
-        await append_event(
-            session,
-            AuditEventInput(client_id=client_id, type="reservation_reaped", cost_micro=0),
-            record.run_id,
-        )
+        .scalars()
+        .all()
+    )
+    for identity in legacy:
+        adopted = await locked_call(session, identity)
+        adopted.lease_until = await database_now(session)
     await session.commit()
-    return len(rows)
+    identities = list(
+        (
+            await session.execute(
+                select(ProviderCall.id)
+                .where(
+                    ProviderCall.state.in_(("reserved", "dispatched")),
+                    ProviderCall.lease_until <= func.clock_timestamp(),
+                )
+                .order_by(ProviderCall.lease_until, ProviderCall.id)
+                .limit(limit)
+            )
+        ).scalars()
+    )
+    await session.commit()
+    done = 0
+    for identity in identities:
+        from sqlalchemy import text
+
+        available: bool = (
+            await session.execute(
+                text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key,0))"),
+                {"key": "provider-call:" + str(identity)},
+            )
+        ).scalar_one()
+        if not available:
+            await session.rollback()
+            continue
+        call = (
+            await session.execute(
+                select(ProviderCall)
+                .where(
+                    ProviderCall.id == identity,
+                    ProviderCall.state.in_(("reserved", "dispatched")),
+                    ProviderCall.lease_until <= func.clock_timestamp(),
+                )
+                .with_for_update(skip_locked=True)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if call is None:
+            await session.rollback()
+            continue
+        kind: Literal["void", "estimate"] = "void" if call.state == "reserved" else "estimate"
+        await apply(
+            session,
+            Evidence(
+                evidence_id=uuid.uuid5(call.id, "expired:" + kind),
+                agency_id=call.agency_id,
+                client_id=call.client_id,
+                call_id=call.id,
+                kind=kind,
+                amount_micro=0 if kind == "void" else call.estimate_micro,
+                reason="undispatched_lease_expired" if kind == "void" else "dispatch_lease_expired",
+            ),
+        )
+        await session.commit()
+        done += 1
+    return done
 
 
 async def main() -> None:
     total = 0
-    while True:
-        async with session_factory() as session:
+    async for session in agency_sessions():
+        while True:
             count = await reap_stale(session, datetime.now(UTC) - timedelta(hours=1))
-        total += count
-        if count < 100:
-            break
-    print(f"Released {total} stale reservations")
+            total += count
+            if count < 100:
+                break
+    print(f"Recovered {total} expired provider calls")
 
 
 if __name__ == "__main__":

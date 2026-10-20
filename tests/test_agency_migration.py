@@ -1,0 +1,188 @@
+"""Upgrade acceptance against a populated 0014 installation."""
+
+import base64
+import os
+import subprocess
+import sys
+
+import pytest
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
+
+
+@pytest.mark.asyncio
+async def test_agency_backfill_preserves_identifiers_credentials_and_grants():
+    url = os.environ.get("TEST_DATABASE_URL")
+    if not url:
+        pytest.skip("TEST_DATABASE_URL is required")
+    env = {
+        **os.environ,
+        "DATABASE_URL": url,
+        "MASTER_ENCRYPTION_KEY": base64.b64encode(b"t" * 32).decode(),
+        "TELEGRAM_APPROVER_CHAT_IDS": "legacy-chat",
+        "APPROVAL_EMAIL_TO": "legacy@example.test",
+        "APPROVAL_WEBHOOK_URL": "https://legacy.test/secret",
+    }
+    command = [sys.executable, "-m", "alembic"]
+    subprocess.run([*command, "upgrade", "0014"], env=env, check=True, capture_output=True)
+    engine = create_async_engine(url)
+    try:
+        async with engine.begin() as conn:
+            client = (
+                await conn.execute(
+                    text("INSERT INTO clients (name) VALUES ('Legacy') RETURNING id")
+                )
+            ).scalar_one()
+            workflow = (
+                await conn.execute(
+                    text(
+                        "INSERT INTO workflows (client_id, name, risk_class) "
+                        "VALUES (:client, 'Legacy', 'R1') RETURNING id"
+                    ),
+                    {"client": client},
+                )
+            ).scalar_one()
+            await conn.execute(
+                text("UPDATE workflows SET policy=CAST(:policy AS jsonb) WHERE id=:id"),
+                {"id": workflow, "policy": '{"rpm":"malformed"}'},
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO approvals(id,workflow_id,action_name,action_hash,"
+                    "action_summary,expires_at) VALUES(gen_random_uuid(),:workflow,"
+                    "'send',decode('abcd','hex'),'Legacy pending review',now()+interval '1 hour')"
+                ),
+                {"workflow": workflow},
+            )
+            key_id = (
+                await conn.execute(
+                    text(
+                        "INSERT INTO virtual_keys (workflow_id, key_hash, prefix) "
+                        "VALUES (:workflow, decode('abcd', 'hex'), 'gk_test') RETURNING id"
+                    ),
+                    {"workflow": workflow},
+                )
+            ).scalar_one()
+            for role in ("admin", "operator", "approver", "viewer"):
+                await conn.execute(
+                    text(
+                        "INSERT INTO users (email, role, client_id, password_hash, password_salt) "
+                        "VALUES (:email, :role, :client, decode('aabb', 'hex'), "
+                        "decode('ccdd', 'hex'))"
+                    ),
+                    {
+                        "email": role + "@legacy.test",
+                        "role": role,
+                        "client": None if role == "admin" else client,
+                    },
+                )
+            await conn.execute(
+                text(
+                    "INSERT INTO admin_sessions (token_hash, user_id, expires_at) "
+                    "SELECT decode('1234', 'hex'), id, now() + interval '1 hour' "
+                    "FROM users WHERE role = 'viewer'"
+                )
+            )
+            original = (
+                await conn.execute(
+                    text(
+                        "SELECT id, email, role, client_id, "
+                        "password_hash, password_salt, active "
+                        "FROM users ORDER BY email"
+                    )
+                )
+            ).all()
+        subprocess.run([*command, "upgrade", "head"], env=env, check=True, capture_output=True)
+        async with engine.connect() as conn:
+            assert (
+                original
+                == (
+                    await conn.execute(
+                        text(
+                            "SELECT id, email, role, client_id, "
+                            "password_hash, password_salt, active "
+                            "FROM users ORDER BY email"
+                        )
+                    )
+                ).all()
+            )
+            assert (await conn.execute(text("SELECT id FROM clients"))).scalar_one() == client
+            assert (await conn.execute(text("SELECT id FROM workflows"))).scalar_one() == workflow
+            policy = (
+                await conn.execute(
+                    text("SELECT policy_version,policy_review_required,policy FROM workflows")
+                )
+            ).one()
+            assert policy.policy_version == 1 and policy.policy_review_required
+            assert policy.policy["models"] == [] and policy.policy["rules"] == []
+            assert (
+                await conn.execute(text("SELECT legacy_source FROM policy_revisions"))
+            ).scalar_one() == {"rpm": "malformed"}
+            legacy_signer = (
+                await conn.execute(
+                    text(
+                        "SELECT key_id,fingerprint,verify_until > now()+interval '7 days' "
+                        "AS protected FROM deployment_keys WHERE kind='signing'"
+                    )
+                )
+            ).one()
+            assert legacy_signer.key_id == "0000" and legacy_signer.protected
+            assert legacy_signer.fingerprint == ""
+            assert (await conn.execute(text("SELECT id, key_hash FROM virtual_keys"))).one() == (
+                key_id,
+                bytes.fromhex("abcd"),
+            )
+            memberships = (
+                await conn.execute(
+                    text(
+                        "SELECT u.role, m.role, m.all_clients, m.active, a.client_id "
+                        "FROM users u JOIN agency_memberships m ON m.user_id = u.id "
+                        "LEFT JOIN client_assignments a ON a.user_id = u.id ORDER BY u.role"
+                    )
+                )
+            ).all()
+            assert memberships == [
+                (role, role, role == "admin", True, None if role == "admin" else client)
+                for role in ("admin", "approver", "operator", "viewer")
+            ]
+            assert (
+                str((await conn.execute(text("SELECT agency_id FROM admin_sessions"))).scalar_one())
+                == "00000000-0000-0000-0000-000000000001"
+            )
+            destinations = (
+                await conn.execute(
+                    text("SELECT enabled, client_id, config::text FROM integration_destinations")
+                )
+            ).all()
+            assert len(destinations) == 3 and all(
+                not d.enabled and d.client_id is None for d in destinations
+            )
+            assert all(
+                "legacy_ciphertext" in d.config
+                and "legacy@example.test" not in d.config
+                and "secret" not in d.config
+                for d in destinations
+            )
+            assert (
+                await conn.execute(text("SELECT count(*) FROM reviewer_group_members"))
+            ).scalar_one() == 2
+            assert (
+                await conn.execute(text("SELECT agency_id FROM workflows"))
+            ).scalar_one() is not None
+        # A downgrade must refuse to broaden real multi-agency grants into legacy global access.
+        async with engine.begin() as conn:
+            other = (
+                await conn.execute(text("INSERT INTO agencies (name) VALUES ('New') RETURNING id"))
+            ).scalar_one()
+        result = subprocess.run([*command, "downgrade", "0014"], env=env, capture_output=True)
+        assert result.returncode != 0 and (
+            b"Cannot downgrade a multi-agency installation" in result.stderr
+            or b"Phase 3 downgrade requires" in result.stderr
+        )
+        async with engine.begin() as conn:
+            await conn.execute(text("DELETE FROM agencies WHERE id = :other"), {"other": other})
+    finally:
+        async with engine.begin() as connection:
+            await connection.execute(text("DROP SCHEMA public CASCADE"))
+            await connection.execute(text("CREATE SCHEMA public"))
+        await engine.dispose()

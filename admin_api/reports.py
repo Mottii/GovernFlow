@@ -15,8 +15,9 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from admin_api.auth import Actor, DbSession, client_scope, permit
+from admin_api.governance_views import governance_snapshot
 from audit.chain import AuditEventInput, append_event
-from core.models import Alert, Budget, Client, Event, MonthlyMetric, ReconcileJob, Run, Workflow
+from core.models import Alert, Budget, Client, MonthlyMetric, ReconcileJob, Workflow
 
 router = APIRouter()
 
@@ -70,20 +71,11 @@ async def monthly(session: AsyncSession, client_id: uuid.UUID, period: str) -> d
             "reserved_micro": budget.reserved_micro if budget else 0,
             "budget_spent_micro": budget.spent_micro if budget else 0,
         }
-    events = (
-        await session.execute(
-            select(Event.cost_micro, Event.estimated, Run.workflow_id)
-            .outerjoin(Run, Run.id == Event.run_id)
-            .where(
-                Event.client_id == client_id,
-                Event.type == "provider_call",
-                Event.ts >= start,
-                Event.ts < end,
-            )
-        )
-    ).all()
-    for cost, estimated, workflow_id in events:
-        group = workflows.get(workflow_id)
+    from policy.projection import facts
+
+    records = await facts(session, [client_id], start, end, period=period)
+    for fact in records:
+        group = workflows.get(fact.workflow_id)
         if group is None:
             group = workflows.setdefault(
                 None,
@@ -99,9 +91,46 @@ async def monthly(session: AsyncSession, client_id: uuid.UUID, period: str) -> d
                     "budget_spent_micro": 0,
                 },
             )
-        group["cost_micro"] += cost or 0
-        group["calls"] += 1
-        group["estimated_calls"] += int(estimated)
+        group["cost_micro"] += fact.cost_micro
+        group["calls"] += fact.calls
+        group["estimated_calls"] += fact.estimated_calls
+        group["estimated_cost_micro"] = group.get("estimated_cost_micro", 0) + (
+            fact.cost_micro if fact.estimated_calls else 0
+        )
+        group["corrected_calls"] = group.get("corrected_calls", 0) + fact.corrected_calls
+    for group in workflows.values():
+        group.setdefault("estimated_cost_micro", 0)
+        group.setdefault("corrected_calls", 0)
+    from sqlalchemy import func
+
+    from core.models import AccountingRecovery, ProviderCall
+
+    pending = (
+        await session.execute(
+            select(ProviderCall.workflow_id, func.count())
+            .join(AccountingRecovery, AccountingRecovery.call_id == ProviderCall.id)
+            .where(
+                ProviderCall.client_id == client_id,
+                ProviderCall.period == period,
+                AccountingRecovery.status != "complete",
+            )
+            .group_by(ProviderCall.workflow_id)
+        )
+    ).all()
+    for group in workflows.values():
+        group["recovery_pending"] = 0
+    for workflow_id, count in pending:
+        if workflow_id in workflows:
+            workflows[workflow_id]["recovery_pending"] = count
+    from core.models import ClientBudget
+
+    client_bucket = (
+        await session.execute(
+            select(ClientBudget).where(
+                ClientBudget.client_id == client_id, ClientBudget.period == period
+            )
+        )
+    ).scalar_one_or_none()
     metric = await session.get(MonthlyMetric, (client_id, period))
     jobs = (
         (
@@ -131,6 +160,21 @@ async def monthly(session: AsyncSession, client_id: uuid.UUID, period: str) -> d
         .all()
     )
     return {
+        **await governance_snapshot(session, [client_id]),
+        "client_budget": {
+            "cap_micro": client_bucket.cap_micro,
+            "spent_micro": client_bucket.spent_micro,
+            "reserved_micro": client_bucket.reserved_micro,
+            "revision": client_bucket.revision,
+            "template_revision_id": str(client_bucket.template_revision_id)
+            if client_bucket.template_revision_id
+            else None,
+            "headroom_micro": None
+            if client_bucket.cap_micro is None
+            else client_bucket.cap_micro - client_bucket.spent_micro - client_bucket.reserved_micro,
+        }
+        if client_bucket
+        else None,
         "client": {"id": str(client.id), "name": client.name},
         "period": period,
         "timezone": "UTC",
@@ -142,6 +186,9 @@ async def monthly(session: AsyncSession, client_id: uuid.UUID, period: str) -> d
                 "cost_micro",
                 "calls",
                 "estimated_calls",
+                "estimated_cost_micro",
+                "corrected_calls",
+                "recovery_pending",
                 "reserved_micro",
                 "budget_spent_micro",
             )
@@ -199,6 +246,9 @@ def csv_report(report: dict[str, Any]) -> str:
             "hours_saved",
             "savings_basis",
             "savings_note",
+            "estimated_cost_micro_usd",
+            "corrected_calls",
+            "recovery_pending",
         ]
     )
     prefix = [safe_cell(report["client"]["name"]), report["period"]]
@@ -218,6 +268,9 @@ def csv_report(report: dict[str, Any]) -> str:
                 "",
                 "",
                 "",
+                row["estimated_cost_micro"],
+                row["corrected_calls"],
+                row["recovery_pending"],
             ]
         )
     totals, saved = report["totals"], report["hours_saved"]
@@ -236,6 +289,9 @@ def csv_report(report: dict[str, Any]) -> str:
             saved["hours"] if saved else "",
             saved["basis"] if saved else "",
             safe_cell(saved["note"]) if saved else "",
+            totals["estimated_cost_micro"],
+            totals["corrected_calls"],
+            totals["recovery_pending"],
         ]
     )
     return buffer.getvalue()
@@ -264,6 +320,9 @@ def html_report(report: dict[str, Any]) -> str:
         total_cost=usd(totals["cost_micro"]),
         calls=totals["calls"],
         estimated_calls=totals["estimated_calls"],
+        estimated_cost=usd(totals["estimated_cost_micro"]),
+        corrected_calls=totals["corrected_calls"],
+        recovery_pending=totals["recovery_pending"],
         saved_text=escape(saved_text),
         rows=rows,
         savings_note=escape(saved["note"]) if saved else "Supply savings evidence before sharing.",
@@ -286,7 +345,7 @@ async def set_hours(
     client_id: uuid.UUID, period: str, body: Savings, session: DbSession, actor: Actor
 ) -> dict[str, Any]:
     permit(actor, "admin", "operator")
-    client_scope(actor, client_id)
+    await client_scope(session, actor, client_id)
     month_bounds(period)
     if await session.get(Client, client_id) is None:
         raise HTTPException(404, "Client not found")
@@ -323,7 +382,7 @@ async def get_report(
     actor: Actor,
     format: Literal["json", "csv", "html"] = "json",
 ) -> Any:
-    client_scope(actor, client_id)
+    await client_scope(session, actor, client_id)
     report = await monthly(session, client_id, period)
     filename = f"governed-{client_id}-{period}"
     if format == "csv":

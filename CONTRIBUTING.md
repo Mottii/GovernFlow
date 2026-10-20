@@ -28,7 +28,7 @@ uv run mypy
 uv run mypy --strict sdks/python/governed_automation
 uv run pytest
 node --test sdks/javascript/index.test.mjs
-docker compose config --quiet
+APP_DATABASE_PASSWORD=compose_validation_only_secret docker compose config --quiet
 ```
 
 Integration tests require `TEST_DATABASE_URL` and `APP_TEST_DATABASE_URL` pointing to **two separate disposable Postgres 16 databases**. The suite recreates tables and exercises migration downgrade/upgrade. Use databases dedicated to testing. `.github/workflows/ci.yml` shows the automated setup.
@@ -44,7 +44,7 @@ pnpm build
 pnpm exec playwright install chromium
 ```
 
-Start the Compose backend and apply migrations, then run `uv run python scripts/seed_e2e.py` from the repository root. This creates an isolated mock tenant and saves test login credentials in a private temporary file. Run `pnpm test` in `dashboard/` to check the browser flow. See [dashboard setup](docs/dashboard.md) for details.
+Start the Compose backend (its initializer applies migrations), enable the local `maintenance` profile, then run `E2E_ADMIN_URL=http://localhost:8003 uv run python scripts/seed_e2e.py` from the repository root. This creates an isolated mock tenant and saves test login credentials in a private temporary file. Run `pnpm test` in `dashboard/` to check the browser flow. See [dashboard setup](docs/dashboard.md) for details.
 
 ## Governance changes
 

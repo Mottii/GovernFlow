@@ -19,11 +19,17 @@ async def test_initial_migration_round_trip_and_immutable_events() -> None:
     engine = create_async_engine(url)
     try:
         async with engine.begin() as conn:
+            client_id = (
+                await conn.execute(
+                    text("INSERT INTO clients(name) VALUES ('Audit fixture') RETURNING id")
+                )
+            ).scalar_one()
             await conn.execute(
                 text(
                     "INSERT INTO events (client_id, type, hash) "
-                    "VALUES (gen_random_uuid(), 'migration_test', decode(repeat('00', 32), 'hex'))"
-                )
+                    "VALUES (:client, 'migration_test', decode(repeat('00', 32), 'hex'))"
+                ),
+                {"client": client_id},
             )
         with pytest.raises(DBAPIError, match="events is append-only"):
             async with engine.begin() as conn:

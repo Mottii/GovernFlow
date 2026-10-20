@@ -8,7 +8,7 @@ import respx
 from sqlalchemy import func, select, update
 
 from admin_api.app import app
-from core.models import Event, Workflow
+from core.models import Event, Run, Workflow
 
 
 @pytest.mark.asyncio
@@ -38,7 +38,34 @@ async def test_monthly_exports_equal_database_totals_and_scope_savings(governed)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://admin"
     ) as admin:
+        async with governed.factory() as session:
+            await session.execute(update(Run).values(stopped=True, stop_reason="report-test"))
+            await session.commit()
+        for tenant in (governed.a, governed.b):
+            template = await admin.post(
+                "/admin/budget-templates",
+                headers=master,
+                json={
+                    "scope": "client",
+                    "scope_id": str(tenant.client.id),
+                    "cap_micro": 100000,
+                    "expected_revision": 0,
+                    "reason": "Report renewal",
+                },
+            )
+            assert template.status_code == 201, template.text
         report = (await admin.get(path, headers=master)).json()
+        assert report["client_budget"]["spent_micro"] == 30
+        assert [t["scope_id"] for t in report["renewal_templates"]] == [str(governed.a.client.id)]
+        assert {r["workflow_id"] for r in report["run_stops"]} == {str(governed.a.workflow.id)}
+        assert all(r["reason"] == "report-test" for r in report["run_stops"])
+        spend = (
+            await admin.get(
+                "/admin/spend", headers=master, params={"client_id": str(governed.a.client.id)}
+            )
+        ).json()
+        assert spend["run_stops"] == report["run_stops"]
+        assert spend["renewal_templates"] == report["renewal_templates"]
         assert report["hours_saved"] is None
         result = await admin.post(
             path + "/hours",

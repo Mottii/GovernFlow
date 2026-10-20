@@ -17,6 +17,8 @@ class GatewayError(Exception):
 
 def error_response(request: Request, exc: GatewayError) -> JSONResponse:
     headers = {"x-gateway-error": exc.code}
+    if getattr(request.state, "call_id", None):
+        headers["x-gateway-call-id"] = request.state.call_id
     if exc.retry_after is not None:
         headers["retry-after"] = str(exc.retry_after)
     if request.url.path == "/v1/messages":

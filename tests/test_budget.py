@@ -3,10 +3,10 @@ import os
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from core.models import Base, Budget, Client, Workflow
+from core.models import Base, Budget, Client, ProviderCall, Workflow
 from policy.budget import HeldReservation, reserve, settle
 from policy.reap import reap_stale
 
@@ -134,6 +134,10 @@ async def test_stale_reservation_released_once() -> None:
             )
             await session.commit()
             assert await reserve(session, workflow_id, "stale", 40, 100)
+            await session.execute(
+                update(ProviderCall).values(lease_until=datetime.now(UTC) - timedelta(seconds=1))
+            )
+            await session.commit()
             assert await reap_stale(session, datetime.now(UTC) + timedelta(hours=1)) == 1
             assert await reap_stale(session, datetime.now(UTC) + timedelta(hours=1)) == 0
             budget = (await session.execute(select(Budget))).scalar_one()
